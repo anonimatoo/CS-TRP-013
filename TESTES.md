@@ -1,27 +1,35 @@
 # Testes do CS TRP 013
 
-Execução em 24/11/2026 com Node.js 24 em Linux. A documentação de instalação usa PowerShell. Nenhuma transação real foi enviada.
+Execução de 24/11/2026. A integração de teste usa Express, PostgreSQL via PGlite e respostas controladas para as APIs da Pagar.me. Nenhuma transação real foi enviada.
 
 | Verificação | Resultado |
 | --- | --- |
+| `npm ci` | 177 pacotes instalados. npm 11 sinalizou o script de instalação do esbuild. As compilações concluíram. |
 | `npm run check` | Sintaxe JavaScript e checagem TypeScript aprovadas. |
-| `npm run build` | Build de produção do Vite concluída. |
-| `npm test` | 12 testes aprovados. Validações, criptografia, sessões, limite de login, CSRF, persistência local, migrações repetíveis e preservação de tabela preexistente, ViaCEP, ciclo de credenciais, cadastro e troca com apenas a SK, bloqueio de produção por padrão e liberação após ativação explícita em fixture, preços, concorrência na criação de checkout, retorno somente para a loja configurada, rejeição de URL externa forjada, conciliação, captura, estorno, confirmação de webhook e encaminhamento no adaptador da Vercel. |
-| `npm run test:browser` | Chromium aprovado em 1448, 768, 390 e 320 px. Verificou a abertura e a responsividade do modal, senha correta/incorreta, opção de exibir senha, cadastro e troca da SK sem solicitar PK, detecção automática de Sandbox e Produção pelo prefixo, aviso do bloqueio de produção, atalho para configuração comercial, ativação com a SK, continuidade do formulário, ViaCEP, navegação na mesma aba para o provedor simulado, retorno à loja e recuperação do pedido após recarregar. |
-| Neon real | PostgreSQL 18 via WSS com certificado TLS verificado. Em execução anterior, migração 001 aplicada no schema `cs_trp_013_v2`, com 11 tabelas e preservação das 21 tabelas preexistentes. Checkout HTTP 200, acesso administrativo anônimo HTTP 401 e sessão compartilhada entre duas instâncias Express com pools distintos, seguida de logout confirmado. |
-| ViaCEP real | Consulta ao CEP 01001-000 retornou HTTP 200 e São Paulo/SP. |
-| `npm audit` e `npm audit --omit=dev` | Zero vulnerabilidades reportadas pelo registro npm na execução. |
-| `vercel.json` | Configuração validada e `vercel build` local aprovado no destino Preview. A saída incluiu o frontend estático e a função Node.js. O manifesto gerado foi verificado com cinco rotas, incluindo checkout, ViaCEP, endpoints administrativos aninhados e webhook. A implantação remota ainda está pendente. |
-| Revisão de segurança do código | Verificados CSRF, origem, opções do cookie, AES-256-GCM, teste de acesso anônimo, SQL parametrizado, campos aceitos pela API e ausência de PAN, CVV e nome impresso no payload enviado ao backend. |
+| `npm run build` | Build do Vite concluída. |
+| `npm test` | 59 testes aprovados em Linux com Node.js 24.22.3. |
+| `node --test` | Os mesmos 59 testes passaram em Linux com Node.js 22.23.5. O npm usa a descoberta de testes do próprio Node. |
+| `npm run test:browser` | Chromium aprovado. Cobriu cadastro e troca de SK, detecção de ambiente, ativação, recuperação do checkout, navegação na mesma aba, retorno à loja, aprovação, recusa, expiração da sessão administrativa e layout em 1448, 768, 390 e 320 px. |
+| `npm audit` e `npm audit --omit=dev` | Zero vulnerabilidades reportadas pelo registro npm. |
+| Instalação PowerShell | PowerShell 7.4.21 com Node.js 22.23.5 em Linux. Geração dos três segredos, preservação de `.env.local` e cópia do modelo conferidas. |
+| `vercel build` | Build local no destino Preview. O artefato tem frontend estático, rewrite de API e função Express com runtime `nodejs24.x` e limite de 30 s. A CLI selecionou Node 24 com base em `engines`. |
 
-A suíte de integração executa as consultas e os comandos SQL em PostgreSQL via PGlite. O provedor de pagamentos é substituído por respostas controladas só na suíte. Os casos de aprovação, recusa, teste de conexão e webhook nessa suíte demonstram comportamento local da aplicação com as respostas esperadas.
+## Regressões verificadas
 
-## Pendências de homologação
+- Criação com HTTP 200 e 201, URL nos domínios oficiais, resposta reduzida enriquecida por consulta ao ID e validade retornada pelo provedor.
+- Preservação do HTTP em respostas com corpo inválido ou incompleto, com categorias distintas para ID, URL, referência, preço, parcelas e data.
+- HTTP 400, 401, 403, 409, 429, 422, 500 e 503, redirecionamento de API, corpo fora de JSON, timeout antes ou após cabeçalhos, DNS, conexão e TLS.
+- Reserva concorrente, recuperação de link e de pedido remoto, estado incerto sem reenvio, encerramento de link apenas com zero sessões e ausência de pedido, retorno e conciliação após webhook autenticado e deduplicado.
+- Migração 003 sobre a versão 002 com checkout, preço e credencial cifrada existentes. Verificação do SSL do cliente PostgreSQL, sessão expirada, preservação de credenciais e ausência de dados de cartão e de respostas brutas nos dados públicos e diagnósticos.
+- Aprovação, recusa, autorização, captura e estorno simulados. O guia de homologação deve ser seguido com as credenciais oficiais da conta para verificar o contrato efetivo.
 
-1. Configurar `DATABASE_URL` como segredo na Vercel e testar a conexão usada pela função implantada. A migração 001 no Neon do lojista foi verificada por WSS. Aplicar a migração 002 no Neon e confirmar as colunas do checkout hospedado. O teste em ambiente implantado ainda precisa confirmar o transporte TCP do driver `pg` e a persistência entre instâncias Vercel.
-2. Configurar um projeto Vercel com HTTPS, domínio, segredos e origem. Verificar o roteamento da função e o carregamento da página pelo alias configurado.
-3. Na Pagar.me, configurar a SK oficial de Sandbox, verificar a permissão de criar links de pagamento e os limites de valor/parcelamento. Verificar cadastro, teste, troca, falha de troca, ativação e remoção com as credenciais reais de sandbox.
-4. Com cartões oficiais de sandbox, verificar abertura do checkout, retorno à loja, aprovação, recusa, autorização, captura, estorno, idempotência e callbacks entregues pela Pagar.me.
-5. Validar procedimentos PCI DSS e LGPD no contexto do lojista e da operação. A auditoria npm e as verificações de código não substituem a avaliação de conformidade nem um teste independente da implantação.
+## Evidência e próximos testes em ambiente oficial
 
-A configuração fornecida mantém cobranças de produção desabilitadas. O processamento real depende de autorização e homologação.
+O site existente respondeu à consulta de checkout e retornou o pedido relatado como `communication_error` em Produção, com HTTP e URL de pagamento ausentes. A versão anterior reproduzia esse registro tanto em falhas antes da resposta quanto ao rejeitar uma resposta HTTP 2xx. O primeiro envio ficou sem evidência suficiente para atribuição a uma causa externa específica.
+
+1. Aplicar a migração 003 no Neon da prévia, com backup e comparação das colunas da 002. Verificar a conexão TCP com TLS pela função implantada. O teste anterior de Neon via WSS permanece documentado no histórico do PR.
+2. Vincular e publicar a prévia de homologação da Vercel com HTTPS, segredos e origem própria. Conferir o alias, a rota `/api/checkout`, a autenticação administrativa e o retorno após o checkout.
+3. Com SK autorizada de Sandbox instalada por mecanismo seguro, verificar leitura e criação de link, abertura do formulário oficial, aprovação e recusa com cartões de teste, webhooks, conciliação, captura e estorno conforme o contrato. Conferir os limites de valor e parcelamento e a habilitação de Links de Pagamento com a Pagar.me.
+4. Em Produção, conciliar o pedido histórico pelo código e pelo nome do checkout, mantendo os dados locais até que haja confirmação do provedor.
+
+A implantação remota da prévia, a migração no Neon remoto e a homologação oficial da Pagar.me ficaram pendentes por ausência de acesso ao projeto e às credenciais autorizadas neste ambiente. A publicação de produção depende da autorização do responsável.
