@@ -3,7 +3,7 @@ import { randomUUID, randomBytes } from 'node:crypto';
 import test from 'node:test';
 import { digits, luhn, parseBrl, validCpf } from '../shared/validation.mjs';
 import { decrypt, encrypt } from '../server/security.mjs';
-import { account, firstKey, fixture, hookSecret, password, publicKey, secondKey, wrongKey } from './fixture.mjs';
+import { account, firstKey, fixture, hookSecret, liveKey, password, publicKey, secondKey, wrongKey } from './fixture.mjs';
 
 test('CPF, moeda brasileira, centavos exatos e Luhn', () => {
   assert.equal(validCpf('529.982.247-25'), true);
@@ -41,7 +41,7 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
       ...(method !== 'GET' ? { Origin: from, 'Content-Type': 'application/json' } : {})
     }, body: method === 'GET' ? undefined : JSON.stringify(body ?? {}) });
     const text = await result.text();
-    for (const secret of [firstKey,secondKey,wrongKey,password]) assert.ok(!text.includes(secret));
+    for (const secret of [firstKey,secondKey,liveKey,wrongKey,password]) assert.ok(!text.includes(secret));
     return { status: result.status, headers: result.headers, json: result.headers.get('content-type')?.includes('json') ? JSON.parse(text) : null, text };
   }
   const post = (path, body = {}, extra) => req(path, { method: 'POST', body, ...extra });
@@ -83,6 +83,17 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
   await t.test('cadastro, autenticação do gateway, configuração comercial e ativação', async () => {
     assert.equal((await req('/checkout')).json.amount, null);
     assert.equal((await keyAction('activate', { confirmed: true })).status, 409);
+    const productionInSandbox = await keyAction('add', { secret: liveKey });
+    assert.equal(productionInSandbox.status, 422);
+    assert.match(productionInSandbox.json.message, /SK.*Produção/);
+    const sandboxInProduction = await post('/admin/gateway/live/add', { secret: firstKey });
+    assert.equal(sandboxInProduction.status, 422);
+    assert.match(sandboxInProduction.json.message, /SK.*Sandbox/);
+    assert.equal(app.remote.calls.length, 0);
+    assert.equal((await post('/admin/gateway/live/add', { secret: liveKey })).json.enabled, false);
+    const productionActivation = await post('/admin/gateway/live/activate', { confirmed: true });
+    assert.equal(productionActivation.status, 409);
+    assert.match(productionActivation.json.message, /bloqueados/);
     assert.equal((await keyAction('add', { secret: 'sk_invalid' })).status, 422);
     assert.equal((await keyAction('add', { secret: wrongKey })).json.http, 401);
     const savedKey = (await keyAction('add', { secret: firstKey })).json;
@@ -97,7 +108,9 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
     assert.equal((await keyAction('test')).json.http, 200);
     assert.equal(app.remote.chargePosts, 0);
     const separate = { publicKey, account, mode: 'gateway' };
-    assert.equal((await keyAction('configure', { ...separate, publicKey: 'pk_wrong_environment' })).status, 422);
+    const wrongPublicKey = await keyAction('configure', { ...separate, publicKey: 'pk_wrong_environment' });
+    assert.equal(wrongPublicKey.status, 422);
+    assert.match(wrongPublicKey.json.message, /PK.*Sandbox/);
     assert.equal((await keyAction('configure', separate)).json.checkoutConfigured, true);
     assert.equal((await keyAction('activate', { confirmed: false })).status, 422);
     assert.equal((await keyAction('activate', { confirmed: true })).json.enabled, true);

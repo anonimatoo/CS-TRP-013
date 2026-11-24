@@ -27,3 +27,11 @@ export function luhn(value) {
     return sum + (number > 9 ? number - 9 : number);
   }, 0) % 10 === 0;
 }
+
+export function pagarmeKeyEnvironment(value, kind) {
+  const key = String(value ?? '').trim();
+  const prefix = kind + '_';
+  if (!key.startsWith(prefix)) return null;
+  if (!/^(?:test_)?[A-Za-z0-9_-]{8,128}$/.test(key.slice(prefix.length))) return null;
+  return key.startsWith(prefix + 'test_') ? 'test' : 'live';
+}

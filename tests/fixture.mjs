@@ -11,6 +11,7 @@ export const password = 'SenhaUnitaria-013!';
 export const hookSecret = 'chave_de_teste_webhook_exclusivamente_local';
 export const firstKey = 'sk_test_local_013_credencial_a';
 export const secondKey = 'sk_test_local_013_credencial_b';
+export const liveKey = 'sk_local_013_producao_a';
 export const wrongKey = 'sk_test_recusada_credencial_x';
 export const publicKey = 'pk_test_local_013_credencial_a';
 export const account = 'acc_TestMerchant013';
@@ -45,7 +46,7 @@ export async function fixture({ browser = false, port = 0, originOverride } = {}
     const body = options.body && JSON.parse(options.body);
     remote.calls.push({ route, key, method, body, idempotency: options.headers['Idempotency-Key'] });
     if (key === wrongKey || remote.failing) return output({ message: 'Invalid API key' }, 401);
-    if (![firstKey,secondKey].includes(key)) return output({ message: 'Invalid API key' }, 401);
+    if (![firstKey,secondKey,liveKey].includes(key)) return output({ message: 'Invalid API key' }, 401);
     if (route === '/orders' && method === 'GET') return output({ data: [...remote.orders.values()].filter(order => !searchParams.has('code') || order.code === searchParams.get('code')) });
     if (route === '/orders' && method === 'POST') {
       remote.chargePosts++;

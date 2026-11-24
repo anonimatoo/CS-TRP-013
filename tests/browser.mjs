@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { chromium } from 'playwright';
-import { fixture, account, firstKey, password, publicKey, secondKey, wrongKey } from './fixture.mjs';
+import { fixture, account, firstKey, liveKey, password, publicKey, secondKey, wrongKey } from './fixture.mjs';
 
 const app = await fixture({ browser: true });
 let browser;
@@ -34,7 +34,19 @@ try {
   await modal.getByText('Chave não cadastrada').waitFor();
   const secretField = modal.getByLabel('Nova Secret Key (SK)');
   assert.equal(await secretField.getAttribute('type'), 'password');
+  const environment = modal.getByRole('combobox', { name: 'Ambiente', exact: true });
+  assert.equal(await environment.inputValue(), 'test');
+  await secretField.fill(liveKey);
+  await modal.getByText('Ambiente identificado: Produção.', { exact: true }).waitFor();
+  assert.equal(await environment.inputValue(), 'live');
+  assert.equal(await secretField.inputValue(), liveKey);
+  assert.equal(await secretField.evaluate(field => field === document.activeElement), true);
+  await modal.getByRole('button', { name: 'ADICIONAR CHAVE' }).click();
+  await modal.getByText('Aguardando tokenização', { exact: true }).waitFor();
+  assert.equal(await modal.getByRole('button', { name: 'ATIVAR GATEWAY', exact: true }).isEnabled(), false);
   await secretField.fill(firstKey);
+  await modal.getByText('Ambiente identificado: Sandbox.', { exact: true }).waitFor();
+  assert.equal(await environment.inputValue(), 'test');
   assert.equal(await modal.getByLabel('Chave pública para tokenização').isVisible(), false);
   await modal.getByRole('button', { name: 'ADICIONAR CHAVE' }).click();
   await modal.getByText('Aguardando tokenização', { exact: true }).waitFor();

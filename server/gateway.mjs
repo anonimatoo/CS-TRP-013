@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { pagarmeKeyEnvironment } from '../shared/validation.mjs';
 import { audit, one } from './db.mjs';
 import { HttpError, decrypt, encrypt } from './security.mjs';
 import { ProviderError } from './pagarme.mjs';
@@ -6,12 +7,12 @@ import { ProviderError } from './pagarme.mjs';
 export const environment = z.enum(['test','live']);
 const accountId = z.string().trim().regex(/^acc_[A-Za-z0-9]{4,100}$/);
 const checkoutSchema = z.object({
-  publicKey: z.string().trim().regex(/^pk_(?:test_)?[A-Za-z0-9_-]{8,128}$/),
+  publicKey: z.string().trim().refine(value => pagarmeKeyEnvironment(value, 'pk') !== null),
   account: accountId,
   mode: z.enum(['gateway','psp'])
 }).strict();
 const keySchema = checkoutSchema.partial().extend({
-  secret: z.string().trim().regex(/^sk_(?:test_)?[A-Za-z0-9_-]{8,128}$/)
+  secret: z.string().trim().refine(value => pagarmeKeyEnvironment(value, 'sk') !== null)
 });
 
 const context = (env, account) => env + ':' + account;
@@ -71,11 +72,15 @@ export function makeGateway(db, config, pagarme) {
     if (!configuring && Boolean(before.secret) !== (action === 'replace')) {
       throw new HttpError(409, before.secret ? 'Use Substituir chave SK.' : 'Use Adicionar chave.');
     }
-    const test = env === 'test';
     const secret = configuring ? gatewaySecret(config, before) : input.data.secret;
-    if (secret.startsWith('sk_test_') !== test ||
-        (input.data.publicKey && input.data.publicKey.startsWith('pk_test_') !== test)) {
-      throw new HttpError(422, 'A chave deve pertencer ao ambiente selecionado.');
+    const secretEnvironment = pagarmeKeyEnvironment(secret, 'sk');
+    if (secretEnvironment !== env) {
+      const label = secretEnvironment === 'test' ? 'Sandbox' : 'Produção';
+      throw new HttpError(422, 'A Secret Key (SK) é de ' + label + '. Selecione esse ambiente para cadastrá-la.');
+    }
+    if (input.data.publicKey && pagarmeKeyEnvironment(input.data.publicKey, 'pk') !== env) {
+      const label = env === 'test' ? 'Sandbox' : 'Produção';
+      throw new HttpError(422, 'Informe uma chave pública (PK) de ' + label + ' para a tokenização.');
     }
     const history = await one(db, `SELECT account, provider_order, id, status FROM cs_trp_013_v2.orders
       WHERE environment=$1 ORDER BY (provider_order IS NOT NULL) DESC, (status <> 'request_failed') DESC, created_at DESC LIMIT 1`, [env]);
