@@ -1,0 +1,40 @@
+{
+  "name": "cs-trp-013",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "22.x || 24.x" },
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "node --watch --env-file-if-exists=.env.local server/index.mjs",
+    "dev:web": "vite --host 0.0.0.0",
+    "check": "node scripts/check.mjs && tsc --noEmit",
+    "build": "tsc --noEmit && vite build",
+    "test": "node --test tests/*.test.mjs",
+    "test:browser": "node tests/browser.mjs",
+    "db:inspect": "node --env-file-if-exists=.env.local scripts/db.mjs inspect",
+    "db:migrate": "node --env-file-if-exists=.env.local scripts/db.mjs migrate",
+    "verify:services": "node --env-file-if-exists=.env.local scripts/verify-services.mjs"
+  },
+  "dependencies": {
+    "credit-card-type": "^10.2.0",
+    "express": "^5.1.0",
+    "helmet": "^8.1.0",
+    "lucide-react": "^0.577.0",
+    "pg": "^8.16.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.4.5",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.1.0",
+    "concurrently": "^9.2.0",
+    "playwright": "^1.58.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.3.0"
+  }
+}
