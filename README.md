@@ -42,6 +42,8 @@ Abra [http://localhost:5173](http://localhost:5173). O Vite encaminha `/api` par
 5. Use **ATIVAR GATEWAY** para liberar pagamentos no ambiente escolhido. **DESATIVAR GATEWAY** bloqueia novas solicitações de compra; uma cobrança já enviada continua sob controle da Pagar.me. **DESCONECTAR CHAVE** apaga a credencial do aplicativo e requer reconexão para consultas remotas posteriores. O histórico local permanece disponível. Faça a revogação definitiva no painel Pagar.me após desconectar ou rotacionar.
 6. Use **FECHAR** para voltar ao checkout mantendo o formulário preenchido na página. Use **SAIR** para revogar a sessão atual. A sessão também expira automaticamente após quatro horas.
 
+Se a central mostrar **Produção bloqueada** no Windows, defina `ALLOW_LIVE_PAYMENTS=true` no `.env.local` e reinicie `npm run dev` quando estiver pronto para receber cobranças reais. Depois, ative o gateway de Produção. Em **Configuração comercial**, selecione **Produção** em **Ambiente do checkout**, confirme o preço e marque **Produto disponível para venda**.
+
 Por ambiente, a aplicação associa pedidos à conta comercial. Uma credencial substituta precisa passar no teste e consultar um pedido de referência quando há histórico remoto. Se a Pagar.me recusar a credencial, a configuração anterior é preservada. A chave nova é usada nos pedidos seguintes sem reiniciar o processo. Alterar a conta comercial de um ambiente com histórico exige migração planejada.
 
 ## Vercel e Neon

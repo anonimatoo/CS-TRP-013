@@ -37,6 +37,7 @@ export interface Gateway {
   updatedAt: string | null;
   http: number | null;
   message: string | null;
+  activationBlock: string | null;
 }
 
 export const statusLabels: Record<string, string> = {

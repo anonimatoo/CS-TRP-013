@@ -91,7 +91,8 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
     assert.equal((await post('/admin/gateway/live/add', { secret: liveKey })).json.enabled, false);
     const productionActivation = await post('/admin/gateway/live/activate', { confirmed: true });
     assert.equal(productionActivation.status, 409);
-    assert.match(productionActivation.json.message, /bloqueados/);
+    assert.match(productionActivation.json.message, /ALLOW_LIVE_PAYMENTS=true/);
+    assert.equal((await req('/admin/gateway/live')).json.activationBlock, productionActivation.json.message);
     assert.equal((await keyAction('add', { secret: 'sk_invalid' })).status, 422);
     assert.equal((await keyAction('add', { secret: wrongKey })).json.http, 401);
     const savedKey = (await keyAction('add', { secret: firstKey })).json;
@@ -215,9 +216,9 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
   });
 });
 
-test('checkout hospedado retorna ao domínio configurado e rejeita URL externa desconhecida', async t => {
+test('checkout em produção exige ativação e retorna ao domínio configurado', async t => {
   const origin = 'https://checkout.example';
-  const app = await fixture({ originOverride: origin });
+  const app = await fixture({ originOverride: origin, allowLive: true });
   t.after(app.close);
   let cookie;
   let csrf;
@@ -232,13 +233,19 @@ test('checkout hospedado retorna ao domínio configurado e rejeita URL externa d
     return json;
   }
   csrf = (await request('/admin/login', { password })).csrf;
-  await request('/admin/gateway/test/add', { secret: firstKey });
-  await request('/admin/gateway/test/activate', { confirmed: true });
+  const saved = await request('/admin/gateway/live/add', { secret: liveKey });
+  assert.equal(saved.activationBlock, null);
+  assert.equal(saved.connected, true);
   await request('/admin/product', {
     name: 'PC Gamer', description: 'Computador gamer personalizado.', image: '/images/pc-gamer.webp',
-    price: '10,10', maxInstallments: 1, enabled: true, operation: 'auth_and_capture', environment: 'test'
+    price: '10,10', maxInstallments: 1, enabled: true, operation: 'auth_and_capture', environment: 'live'
   }, 'PUT');
+  assert.equal((await request('/checkout', undefined, 'GET')).ready, false);
+  assert.equal(app.remote.linkPosts, 0);
+  await request('/admin/gateway/live/activate', { confirmed: true });
   const checkout = await request('/checkout', undefined, 'GET');
+  assert.equal(checkout.ready, true);
+  assert.equal(app.remote.linkPosts, 0);
   const order = {
     id: randomUUID(), version: checkout.version, gatewayVersion: checkout.gatewayVersion, installments: 1,
     buyer: { name: 'Comprador Teste', cpf: '52998224725', email: 'teste@example.com', phone: '11900000000',
@@ -248,6 +255,7 @@ test('checkout hospedado retorna ao domínio configurado e rejeita URL externa d
   assert.equal(result.status, 'pending');
   const sent = app.remote.calls.filter(call => call.method === 'POST');
   assert.deepEqual(sent.map(call => call.route), ['/paymentlinks']);
+  assert.equal(sent[0].hostname, 'api.pagar.me');
   assert.equal(sent[0].body.flow_settings.success_url, origin + '/?pedido=' + order.id);
   const persisted = JSON.stringify((await app.db.query('SELECT * FROM cs_trp_013_v2.orders')).rows);
   assert.ok(!persisted.includes('52998224725') && !persisted.includes('teste@example.com'));

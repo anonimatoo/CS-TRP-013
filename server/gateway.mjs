@@ -14,12 +14,20 @@ const context = (env, account) => env + ':' + account;
 export const gatewayRow = (db, env, lock = false) =>
   one(db, 'SELECT * FROM cs_trp_013_v2.gateway WHERE environment=$1' + (lock ? ' FOR UPDATE' : ''), [env]);
 export const gatewaySecret = (config, row) => decrypt(config.encryptionKey, row.secret, context(row.environment, row.account));
-const meta = row => ({
-  environment: row.environment, hasKey: Boolean(row.secret), enabled: row.enabled, connected: row.last_ok,
-  testedAt: row.tested_at, updatedAt: row.updated_at, http: row.last_http, message: row.last_message
-});
-
 export function makeGateway(db, config, pagarme) {
+  function activationBlock(environment) {
+    if (environment !== 'live' || config.allowLive) return null;
+    return config.production
+      ? 'Pagamentos de produção estão bloqueados. Defina ALLOW_LIVE_PAYMENTS=true nas variáveis da implantação e publique uma nova versão.'
+      : 'Pagamentos de produção estão bloqueados. Defina ALLOW_LIVE_PAYMENTS=true no .env.local e reinicie a aplicação.';
+  }
+
+  const meta = row => ({
+    environment: row.environment, hasKey: Boolean(row.secret), enabled: row.enabled, connected: row.last_ok,
+    testedAt: row.tested_at, updatedAt: row.updated_at, http: row.last_http, message: row.last_message,
+    activationBlock: activationBlock(row.environment)
+  });
+
   async function probe(key, account, anchor) {
     let response;
     let observedAccount;
@@ -121,7 +129,8 @@ export function makeGateway(db, config, pagarme) {
     const before = await gatewayRow(db, env);
     if (!before.secret) throw new HttpError(409, 'Nenhuma chave cadastrada.');
     if (action === 'activate') {
-      if (env === 'live' && !config.allowLive) throw new HttpError(409, 'Pagamentos de produção estão bloqueados neste deploy.');
+      const block = activationBlock(env);
+      if (block) throw new HttpError(409, block);
       if (form?.confirmed !== true) throw new HttpError(422, 'Confirme que a credencial pode criar links de pagamento na Pagar.me.');
       if (!before.last_ok) throw new HttpError(409, 'Execute um teste de conexão bem-sucedido.');
       await pagarme(gatewaySecret(config, before), '/paymentlinks?per_page=1');

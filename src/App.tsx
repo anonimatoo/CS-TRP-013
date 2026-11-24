@@ -66,7 +66,7 @@ export default function App() {
               {tabs.map(item => <button className={'tab ' + (tab === item.key ? 'active' : '')} type="button" key={item.key} aria-pressed={tab === item.key} onClick={() => setTab(item.key)}>{item.label}</button>)}
             </nav>
             {(tab === 'dashboard' || tab === 'transactions') && <label className="field env-field">Ambiente<select value={env} onChange={e => setEnv(e.target.value as Environment)}><option value="test">Sandbox</option><option value="live">Produção</option></select></label>}
-            {tab === 'gateway' && <Gateway csrf={csrf} env={env} onEnvironmentChange={setEnv} onChange={refresh} onExpired={() => setCsrf('')} />}
+            {tab === 'gateway' && <Gateway csrf={csrf} env={env} product={product} onCommercialSettings={() => setTab('settings')} onEnvironmentChange={setEnv} onChange={refresh} onExpired={() => setCsrf('')} />}
             {tab === 'dashboard' && <Dashboard key={env} env={env} />}
             {tab === 'settings' && <Settings csrf={csrf} onChange={refresh} />}
             {tab === 'transactions' && <Transactions key={env} csrf={csrf} env={env} />}

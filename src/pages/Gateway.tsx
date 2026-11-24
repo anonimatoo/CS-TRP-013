@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Activity, CircleDot, KeyRound, Power, RefreshCw, Unlink } from 'lucide-react';
 import { pagarmeKeyEnvironment } from '../../shared/validation.mjs';
 import { Field, Loader } from '../components/UI';
-import { ApiError, api, dateTime, envLabel, explain, type Environment, type Gateway as GatewayState } from '../services/api';
+import { ApiError, api, dateTime, envLabel, explain, type Environment, type Gateway as GatewayState, type Product } from '../services/api';
 
 type Action = 'add' | 'replace' | 'test' | 'activate' | 'disable' | 'disconnect';
 type Pending = 'activate' | 'disconnect';
@@ -10,12 +10,14 @@ type Pending = 'activate' | 'disconnect';
 interface Props {
   csrf: string;
   env: Environment;
+  product: Product | null;
+  onCommercialSettings: () => void;
   onEnvironmentChange: (env: Environment) => void;
   onChange: () => void;
   onExpired: () => void;
 }
 
-export function Gateway({ csrf, env, onEnvironmentChange, onChange, onExpired }: Props) {
+export function Gateway({ csrf, env, product, onCommercialSettings, onEnvironmentChange, onChange, onExpired }: Props) {
   const [configuration, setConfiguration] = useState<GatewayState>();
   const [retry, setRetry] = useState(0);
   const [key, setKey] = useState('');
@@ -87,9 +89,9 @@ export function Gateway({ csrf, env, onEnvironmentChange, onChange, onExpired }:
   }
 
   const inCheck = busy === 'loading' || busy === 'test' || busy === 'add' || busy === 'replace';
-  const tone = inCheck ? 'blue' : !gateway?.hasKey ? 'gray' : gateway.connected === false ? 'red' : gateway.enabled ? 'green' : 'yellow';
+  const tone = inCheck ? 'blue' : !gateway?.hasKey ? 'gray' : gateway.connected === false ? 'red' : gateway.enabled && !gateway.activationBlock ? 'green' : 'yellow';
   const flag = inCheck ? 'Conexão em verificação' : !gateway?.hasKey ? 'Chave não cadastrada' : gateway.connected === false
-    ? ([401,403].includes(gateway.http ?? 0) ? 'Autenticação recusada' : 'Falha no teste') : gateway.enabled ? 'Conectado e ativado' : 'Gateway desativado';
+    ? ([401,403].includes(gateway.http ?? 0) ? 'Autenticação recusada' : 'Falha no teste') : gateway.activationBlock ? 'Produção bloqueada' : gateway.enabled ? 'Conectado e ativado' : 'Gateway desativado';
 
   return <>
     <label className="field env-field">Ambiente
@@ -108,12 +110,20 @@ export function Gateway({ csrf, env, onEnvironmentChange, onChange, onExpired }:
       <dl className="gateway-facts">
         <div><dt>Chave cadastrada</dt><dd>{gateway.hasKey ? 'Sim' : 'Não'}</dd></div>
         <div><dt>Conexão com a Pagar.me</dt><dd>{gateway.connected === null ? 'A testar' : gateway.connected ? 'Leitura validada' : 'Falha no teste'}</dd></div>
-        <div><dt>Processamento</dt><dd>{gateway.enabled ? 'Ativado' : 'Desativado'}</dd></div>
+        <div><dt>Processamento</dt><dd>{gateway.activationBlock ? 'Bloqueado no servidor' : gateway.enabled ? 'Ativado' : 'Desativado'}</dd></div>
         <div><dt>Última atualização</dt><dd>{dateTime(gateway.updatedAt)}</dd></div>
         <div><dt>Último teste</dt><dd>{dateTime(gateway.testedAt)}</dd></div>
         <div><dt>HTTP do provedor</dt><dd>{gateway.http ?? '—'}</dd></div>
       </dl>
       {gateway.message && <p className="notice info">{gateway.message}</p>}
+      {gateway.activationBlock && <p className="notice info">{gateway.activationBlock}</p>}
+      {!gateway.activationBlock && gateway.connected && !gateway.enabled && <p className="notice info">Para liberar o pagamento em {envLabel(env)}, use <strong>ATIVAR GATEWAY</strong> e confirme.</p>}
+      {product && (product.environment !== env || !product.enabled || !product.amount) && <div className="notice info">
+        {product.environment !== env && <p>O checkout usa <strong>{envLabel(product.environment)}</strong>. Selecione {envLabel(env)} em <strong>Ambiente do checkout</strong> para usar este gateway na venda.</p>}
+        {!product.amount && <p>Informe o valor da venda.</p>}
+        {!product.enabled && <p>Marque <strong>Produto disponível para venda</strong>.</p>}
+        <button className="text-button" type="button" onClick={onCommercialSettings}>Abrir configuração comercial</button>
+      </div>}
     </> : busy ? <p><Loader /> Consultando configuração</p> : <button className="button secondary" onClick={() => setRetry(value => value + 1)}>Recarregar</button>}
     <form onSubmit={event => { event.preventDefault(); if (gateway) void act(gateway.hasKey ? 'replace' : 'add'); }}>
       <div className="fields admin-fields">
@@ -125,14 +135,15 @@ export function Gateway({ csrf, env, onEnvironmentChange, onChange, onExpired }:
         <button className="button primary" type={gateway.hasKey ? 'button' : 'submit'} disabled={!!busy || gateway.hasKey}><KeyRound size={17} /> ADICIONAR CHAVE</button>
         <button className="button dark" type="button" disabled={!!busy || !gateway.hasKey} onClick={() => void act('test')}><Activity size={17} /> TESTAR CONEXÃO</button>
         <button className="button secondary" type={gateway.hasKey ? 'submit' : 'button'} disabled={!!busy || !gateway.hasKey}><RefreshCw size={17} /> SUBSTITUIR CHAVE SK</button>
-        <button className="button secondary" type="button" disabled={!!busy || !gateway.connected || gateway.enabled} onClick={() => { setPending('activate'); setConfirmed(false); }}><Power size={17} /> ATIVAR GATEWAY</button>
+        <button className="button secondary" type="button" disabled={!!busy || !gateway.connected || gateway.enabled || Boolean(gateway.activationBlock)} onClick={() => { setPending('activate'); setConfirmed(false); }}><Power size={17} /> ATIVAR GATEWAY</button>
         <button className="button secondary" type="button" disabled={!!busy || !gateway.enabled} onClick={() => void act('disable')}><Power size={17} /> DESATIVAR GATEWAY</button>
         <button className="button danger" type="button" disabled={!!busy || !gateway.hasKey} onClick={() => { setPending('disconnect'); setConfirmed(false); }}><Unlink size={17} /> DESCONECTAR CHAVE</button>
       </div>}
     </form>
     {gateway && pending && <div className="confirmation">
       <label><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} /> {pending === 'activate'
-        ? 'Confirmei que a Secret Key pode criar links de pagamento na Pagar.me.'
+        ? (env === 'live' ? 'Confirmei que a Secret Key pode criar links de pagamento na Pagar.me e autorizo cobranças reais neste checkout.'
+          : 'Confirmei que a Secret Key pode criar links de pagamento na Pagar.me.')
         : 'Confirmo a remoção da chave deste sistema. Revogarei a chave no painel oficial da Pagar.me.'}</label>
       <div><button className="button secondary" type="button" onClick={() => setPending('')}>Voltar</button>
         <button className={'button ' + (pending === 'disconnect' ? 'danger' : 'primary')} disabled={!confirmed || !!busy} type="button" onClick={() => void act(pending)}>{busy && <Loader />} Confirmar</button></div>

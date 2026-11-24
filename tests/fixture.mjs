@@ -15,7 +15,7 @@ export const liveKey = 'sk_local_013_producao_a';
 export const wrongKey = 'sk_test_recusada_credencial_x';
 export const account = 'acc_TestMerchant013';
 
-export async function fixture({ browser = false, port = 0, originOverride } = {}) {
+export async function fixture({ browser = false, port = 0, originOverride, allowLive = false } = {}) {
   const pg = new PGlite();
   const adapter = client => ({
     query: (sql, args) => !args && sql.startsWith('CREATE SCHEMA') && sql.includes(';')
@@ -117,7 +117,7 @@ export async function fixture({ browser = false, port = 0, originOverride } = {}
   const origin = 'http://127.0.0.1:' + server.address().port;
   const config = configFromEnv({
     ADMIN_PASSWORD: password, SESSION_SECRET: 'sessao_local_de_teste_exclusivamente_013',
-    ENCRYPTION_KEY: Buffer.alloc(32, 17).toString('base64'), WEBHOOK_SECRET: hookSecret, APP_ORIGIN: originOverride ?? origin
+    ENCRYPTION_KEY: Buffer.alloc(32, 17).toString('base64'), WEBHOOK_SECRET: hookSecret, APP_ORIGIN: originOverride ?? origin, ALLOW_LIVE_PAYMENTS: String(allowLive)
   });
   const app = createApp({ db, config, pagarme, viaFetch });
   if (browser) {

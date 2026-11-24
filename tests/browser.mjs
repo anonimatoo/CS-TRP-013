@@ -42,11 +42,10 @@ try {
   assert.equal(await secretField.inputValue(), liveKey);
   assert.equal(await secretField.evaluate(field => field === document.activeElement), true);
   await modal.getByRole('button', { name: 'ADICIONAR CHAVE' }).click();
-  await modal.getByText('Gateway desativado', { exact: true }).waitFor();
-  await modal.getByRole('button', { name: 'ATIVAR GATEWAY', exact: true }).click();
-  await modal.getByRole('checkbox', { name: /Confirmei que a Secret Key/ }).check();
-  await modal.getByRole('button', { name: 'Confirmar', exact: true }).click();
-  await modal.getByRole('alert').getByText(/Pagamentos de produção estão bloqueados/).waitFor();
+  await modal.getByText('Produção bloqueada', { exact: true }).waitFor();
+  await modal.getByText(/Defina ALLOW_LIVE_PAYMENTS=true no .env.local/).waitFor();
+  await modal.getByText(/O checkout usa/).waitFor();
+  assert.equal(await modal.getByRole('button', { name: 'ATIVAR GATEWAY', exact: true }).isEnabled(), false);
   await secretField.fill(firstKey);
   await modal.getByText('Ambiente identificado: Sandbox.', { exact: true }).waitFor();
   assert.equal(await environment.inputValue(), 'test');
@@ -68,7 +67,7 @@ try {
   await secretField.fill(secondKey);
   await modal.getByRole('button', { name: 'SUBSTITUIR CHAVE SK' }).click();
   await modal.getByText(/Chave substituída/).waitFor();
-  await modal.getByRole('button', { name: 'Configuração comercial' }).click();
+  await modal.getByRole('button', { name: 'Abrir configuração comercial', exact: true }).click();
   await modal.getByLabel('Valor da venda').fill('2.999,99');
   await modal.getByLabel('Máximo de parcelas').fill('6');
   await modal.getByRole('checkbox', { name: 'Produto disponível para venda' }).check();
