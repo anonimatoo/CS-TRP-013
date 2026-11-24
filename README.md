@@ -44,7 +44,7 @@ Por ambiente, a aplicação associa pedidos à conta comercial. Uma credencial s
 
 ## Vercel e Neon
 
-Importe o repositório como projeto Vite na Vercel. Use a versão suportada do Node selecionada no projeto. O arquivo `vercel.json` define a build e a função Express que recebe as rotas de API.
+Importe o repositório como projeto Vite na Vercel. Use a versão suportada do Node selecionada no projeto. O arquivo `vercel.json` define a build e encaminha as rotas de API, inclusive as aninhadas, à função Express. Para uma prévia a partir de um projeto vinculado ao GitHub, use **Deployments → Create Deployment** e escolha a branch `codex/cs-trp-013-checkout` enquanto o PR estiver aberto. [Deploy pela branch](https://vercel.com/docs/git)
 
 | Variável | Configuração |
 | --- | --- |

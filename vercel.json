@@ -4,7 +4,10 @@
   "installCommand": "npm ci",
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
-  "functions": { "api/[...route].mjs": { "maxDuration": 30 } },
+  "functions": { "api/router.mjs": { "maxDuration": 30 } },
+  "rewrites": [
+    { "source": "/api/:__cs_path+", "destination": "/api/router" }
+  ],
   "headers": [
     {
       "source": "/(.*)",
