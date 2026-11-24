@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Activity, CircleDot, KeyRound, Power, RefreshCw, Unlink } from 'lucide-react';
 import { pagarmeKeyEnvironment } from '../../shared/validation.mjs';
 import { Field, Loader } from '../components/UI';
-import { ApiError, api, dateTime, envLabel, explain, type Environment, type Gateway as GatewayState, type Product } from '../services/api';
+import { ApiError, api, dateTime, envLabel, explain, providerErrorLabel, type Environment, type Gateway as GatewayState, type Product } from '../services/api';
 
 type Action = 'add' | 'replace' | 'test' | 'activate' | 'disable' | 'disconnect';
 type Pending = 'activate' | 'disconnect';
@@ -76,7 +76,7 @@ export function Gateway({ csrf, env, product, onCommercialSettings, onEnvironmen
         add: 'Secret Key cadastrada e validada.',
         replace: 'Chave substituída. Revogue a chave anterior no painel oficial da Pagar.me.',
         test: result.message ?? '',
-        activate: 'Gateway ativado.',
+        activate: 'Gateway ativado para novas vendas.',
         disable: 'Gateway desativado. A consulta a transações anteriores continua disponível.',
         disconnect: 'Credencial removida. Para revogá-la definitivamente, acesse o painel oficial da Pagar.me.'
       };
@@ -84,14 +84,15 @@ export function Gateway({ csrf, env, product, onCommercialSettings, onEnvironmen
     } catch (failure) {
       if (failure instanceof ApiError && failure.status === 401) onExpired();
       else setFeedback({ error: true, text: explain(failure) +
-        (failure instanceof ApiError && failure.http ? ' HTTP ' + failure.http + '.' : '') });
+        (failure instanceof ApiError && failure.http ? ' HTTP ' + failure.http + '.' : '') +
+        (failure instanceof ApiError && failure.category ? ' ' + providerErrorLabel(failure.category) + '.' : '') });
     } finally { setBusy(''); }
   }
 
   const inCheck = busy === 'loading' || busy === 'test' || busy === 'add' || busy === 'replace';
   const tone = inCheck ? 'blue' : !gateway?.hasKey ? 'gray' : gateway.connected === false ? 'red' : gateway.enabled && !gateway.activationBlock ? 'green' : 'yellow';
   const flag = inCheck ? 'Conexão em verificação' : !gateway?.hasKey ? 'Chave não cadastrada' : gateway.connected === false
-    ? ([401,403].includes(gateway.http ?? 0) ? 'Autenticação recusada' : 'Falha no teste') : gateway.activationBlock ? 'Produção bloqueada' : gateway.enabled ? 'Conectado e ativado' : 'Gateway desativado';
+    ? (gateway.readError ? providerErrorLabel(gateway.readError) : 'Falha no teste') : gateway.activationBlock ? 'Produção bloqueada' : gateway.enabled ? 'Conectado e ativado' : 'Gateway desativado';
 
   return <>
     <label className="field env-field">Ambiente
@@ -109,11 +110,16 @@ export function Gateway({ csrf, env, product, onCommercialSettings, onEnvironmen
     {gateway ? <>
       <dl className="gateway-facts">
         <div><dt>Chave cadastrada</dt><dd>{gateway.hasKey ? 'Sim' : 'Não'}</dd></div>
-        <div><dt>Conexão com a Pagar.me</dt><dd>{gateway.connected === null ? 'A testar' : gateway.connected ? 'Leitura validada' : 'Falha no teste'}</dd></div>
+        <div><dt>Autenticação</dt><dd>{gateway.authenticated === null ? 'A verificar' : gateway.authenticated ? 'Confirmada' : 'Recusada'}</dd></div>
+        <div><dt>Leitura do checkout</dt><dd>{gateway.checkoutReadable === null ? 'A verificar' : gateway.checkoutReadable ? 'Confirmada' : 'Acesso recusado'}</dd></div>
+        <div><dt>Criação de checkout</dt><dd>{gateway.checkoutCreationVerifiedAt ? 'Confirmada em ' + dateTime(gateway.checkoutCreationVerifiedAt) : 'A comprovar na criação de um link'}</dd></div>
         <div><dt>Processamento</dt><dd>{gateway.activationBlock ? 'Bloqueado no servidor' : gateway.enabled ? 'Ativado' : 'Desativado'}</dd></div>
         <div><dt>Última atualização</dt><dd>{dateTime(gateway.updatedAt)}</dd></div>
         <div><dt>Último teste</dt><dd>{dateTime(gateway.testedAt)}</dd></div>
-        <div><dt>HTTP do provedor</dt><dd>{gateway.http ?? '—'}</dd></div>
+        <div><dt>HTTP do teste de leitura</dt><dd>{gateway.http ?? '—'}</dd></div>
+        <div><dt>Última tentativa de criar link</dt><dd>{dateTime(gateway.checkoutAttemptedAt)}</dd></div>
+        <div><dt>HTTP da criação</dt><dd>{gateway.checkoutHttp ?? '—'}</dd></div>
+        <div><dt>Falha na última criação</dt><dd>{providerErrorLabel(gateway.checkoutError)}</dd></div>
       </dl>
       {gateway.message && <p className="notice info">{gateway.message}</p>}
       {gateway.activationBlock && <p className="notice info">{gateway.activationBlock}</p>}

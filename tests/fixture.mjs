@@ -18,7 +18,7 @@ export const account = 'acc_TestMerchant013';
 export async function fixture({ browser = false, port = 0, originOverride, allowLive = false } = {}) {
   const pg = new PGlite();
   const adapter = client => ({
-    query: (sql, args) => !args && sql.startsWith('CREATE SCHEMA') && sql.includes(';')
+    query: (sql, args) => !args && /^(CREATE SCHEMA|ALTER TABLE)/.test(sql) && sql.includes(';')
       ? client.exec(sql) : client.query(sql, args)
   });
   const db = { ...adapter(pg), tx: fn => pg.transaction(tx => fn(adapter(tx))) };
@@ -37,9 +37,10 @@ export async function fixture({ browser = false, port = 0, originOverride, allow
   }
   const remote = {
     calls: [], orders: new Map(), links: new Map(), hooks: new Map(), linkPosts: 0, sequence: 0, failing: false,
-    nextLinkFault: '',
+    nextLinkFault: '', respondToCreation: null, linkCodes: new Map(),
+    orderLookup: null, checkoutLookup: null,
     complete(code, status = 'paid') {
-      const link = [...this.links.values()].find(value => value.order_code === code);
+      const link = [...this.links.values()].find(value => this.linkCodes.get(value.id) === code);
       if (!link || link.total_sessions !== 0) throw new Error('Checkout não está disponível para simular um pedido.');
       const seq = ++this.sequence;
       const amount = link.cart_settings.total_cost;
@@ -66,25 +67,42 @@ export async function fixture({ browser = false, port = 0, originOverride, allow
     const { method } = options;
     const key = Buffer.from(options.headers.Authorization.slice(6), 'base64').toString().slice(0,-1);
     const body = options.body && JSON.parse(options.body);
-    remote.calls.push({ hostname, route, key, method, body, idempotency: options.headers['Idempotency-Key'] });
+    remote.calls.push({ hostname, route, key, method, body, idempotency: options.headers['Idempotency-Key'],
+      userAgent: options.headers['User-Agent'], query: searchParams });
     if (key === wrongKey || remote.failing) return output({ message: 'Invalid API key' }, 401);
     if (![firstKey,secondKey,liveKey].includes(key)) return output({ message: 'Invalid API key' }, 401);
+    if (route === '/orders' && method === 'GET' && searchParams.has('code') && remote.orderLookup) return remote.orderLookup(searchParams);
     if (route === '/orders' && method === 'GET') return output({ data: [...remote.orders.values()].filter(order => !searchParams.has('code') || order.code === searchParams.get('code')) });
     if (route === '/paymentlinks' && method === 'POST') {
       const fault = remote.nextLinkFault;
       remote.nextLinkFault = '';
       remote.linkPosts++;
       const id = 'pl_DemoCheckout' + ++remote.sequence;
+      const amount = body.cart_settings.items[0].amount;
+      // Based on checkout-response and criar-link. The response example omits order_code.
       const link = {
-        ...body, id,
+        id, name: body.name, type: body.type,
         url: fault === 'invalid_url' ? 'https://payment-link.pagar.me.evil.example/' + id : 'https://payment-link.pagar.me/' + id,
-        status: 'active', total_sessions: 0, created_at: new Date().toISOString(),
-        cart_settings: { ...body.cart_settings, total_cost: body.cart_settings.items[0].amount }
+        status: 'active', total_sessions: 0, total_paid_sessions: 0,
+        max_sessions: body.max_sessions, max_paid_sessions: body.max_paid_sessions,
+        created_at: new Date().toISOString().replace(/(\.\d+)Z$/, '$10000Z'),
+        expires_in: body.expires_in, payment_settings: body.payment_settings,
+        cart_settings: { items: body.cart_settings.items, items_total_cost: amount, shipping_cost: 0, shipping_total_cost: 0, total_cost: amount }
       };
-      remote.links.set(id, link);
-      if (fault === 'timeout') throw new Error('Fixture network failure');
+      const persist = () => {
+        remote.links.set(id, link);
+        remote.linkCodes.set(id, body.order_code);
+      };
+      if (remote.respondToCreation) {
+        const respond = remote.respondToCreation;
+        remote.respondToCreation = null;
+        return respond({ link, persist });
+      }
+      persist();
+      if (fault === 'timeout') throw new DOMException('Fixture timeout after provider created the link', 'TimeoutError');
       return output(link, 201);
     }
+    if (route === '/paymentlinks' && searchParams.has('name') && remote.checkoutLookup) return remote.checkoutLookup(searchParams);
     if (route === '/paymentlinks') return output({
       data: [...remote.links.values()].filter(link => !searchParams.has('name') || link.name === searchParams.get('name'))
     });

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { BadgeCheck, Barcode, Check, CreditCard, Hash, Headset, Info, Laptop, LockKeyhole, Mail, MapPin, Phone, Search, Settings, ShieldCheck, Truck, UserRound } from 'lucide-react';
 import { digits, states, validCpf } from '../../shared/validation.mjs';
-import { ApiError, api, brl, explain, statusLabel, type Product, type Receipt } from '../services/api';
+import { ApiError, api, brl, explain, providerErrorLabel, statusLabel, type Product, type Receipt } from '../services/api';
 import { Field, Loader, SectionHeading } from '../components/UI';
 
 const defaultProduct = {
@@ -29,7 +29,8 @@ function currentReceipt() {
     receiptStorage(returned);
     return returned;
   }
-  return receiptStorage();
+  const stored = receiptStorage();
+  return orderReference.test(stored) ? stored : '';
 }
 
 function mask(value: string, template: string) {
@@ -63,22 +64,48 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
   const [lastId, setLastId] = useState(currentReceipt);
   const addressRequest = useRef(0);
   const inFlight = useRef(false);
-  const chargeStarted = useRef(false);
+  const [missing, setMissing] = useState(false);
+  const [statusError, setStatusError] = useState(false);
   const count = shop.amount ? Math.min(shop.maxInstallments, shop.amount) : 1;
-  const incomplete = ['processing','communication_error','pending','review','authorized','created'].includes(receipt?.status ?? '');
+  const waiting = !receipt || (!receipt.newPurchaseAllowed &&
+    ['processing','communication_error','pending','review','authorized','created','request_failed'].includes(receipt.status));
   const saved = Boolean(lastId);
+  const checkoutError = ['request_failed','communication_error'].includes(receipt?.status ?? '') ? receipt?.checkoutError : null;
+  const checkoutTitle = receipt?.checkoutUrl ? 'Checkout criado'
+    : receipt?.status === 'processing' && !receipt.providerStatus ? 'Criando checkout'
+    : checkoutError === 'provider_authentication' || checkoutError === 'provider_permission'
+      ? providerErrorLabel(checkoutError)
+      : ['provider_validation','gateway_configuration'].includes(checkoutError ?? '') ? 'Erro de configuração do checkout'
+      : receipt?.status === 'pending' && receipt.reconciliation === 'pending' ? 'Conciliação pendente'
+      : receipt?.status === 'pending' ? 'Aguardando pagamento'
+      : receipt ? statusLabel(receipt.status) : missing ? 'Referência ainda não localizada' : 'Consultando pedido';
 
   useEffect(() => { setInstallments(1); }, [shop.version]);
   useEffect(() => {
-    if (!lastId || busy) return;
+    if (!lastId || busy || !waiting) return;
     let active = true;
-    const sync = () => api<Receipt>('/orders/' + lastId).then(result => {
-      if (active) setReceipt(result);
-    }).catch(() => {});
-    if (!receipt) void sync();
-    const id = window.setInterval(() => { if (!receipt || incomplete) void sync(); }, 6500);
+    let syncing = false;
+    async function sync() {
+      if (syncing) return;
+      syncing = true;
+      try {
+        const result = await api<Receipt>('/orders/' + lastId);
+        if (active) {
+          setReceipt(result);
+          setMissing(false);
+          setStatusError(false);
+        }
+      } catch (failure) {
+        if (active) {
+          setMissing(failure instanceof ApiError && failure.status === 404);
+          setStatusError(true);
+        }
+      } finally { syncing = false; }
+    }
+    if (!receipt?.checkoutUrl) void sync();
+    const id = window.setInterval(() => void sync(), 6500);
     return () => { active = false; window.clearInterval(id); };
-  }, [lastId, busy, receipt, incomplete]);
+  }, [lastId, busy, waiting]);
 
   const field = (key: keyof typeof buyer, transform = (value: string) => value) => ({
     value: buyer[key],
@@ -110,12 +137,13 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
     setLastId('');
     setReceipt(null);
     setError('');
-    chargeStarted.current = false;
+    setMissing(false);
+    setStatusError(false);
   }
 
   async function pay(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!shop.ready || shop.gatewayVersion === undefined || saved || inFlight.current || chargeStarted.current) return;
+    if (!shop.ready || shop.gatewayVersion === undefined || (saved && !missing) || inFlight.current) return;
     setError('');
     if (buyer.name.trim().split(/\s+/).length < 2) { setError('Informe o nome completo.'); return; }
     if (!validCpf(buyer.cpf)) { setError('Informe um CPF válido.'); return; }
@@ -125,10 +153,14 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
     setBusy(true);
     let id = '';
     try {
-      id = crypto.randomUUID();
+      id = lastId || crypto.randomUUID();
       receiptStorage(id);
+      const url = new URL(window.location.href);
+      url.searchParams.set('pedido', id);
+      window.history.replaceState(null, '', url);
       setLastId(id);
-      chargeStarted.current = true;
+      setMissing(false);
+      setStatusError(false);
       const result = await api<Receipt>('/orders', { method: 'POST', body: {
         id, version: shop.version, gatewayVersion: shop.gatewayVersion, installments, buyer
       } });
@@ -136,11 +168,11 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
       if (result.checkoutUrl) window.location.assign(result.checkoutUrl);
     } catch (failure) {
       if (id && failure instanceof ApiError && failure.safeToRetry) {
-        newPurchase();
+        if (!lastId) newPurchase();
         if (failure.status === 409 || failure.status === 503) refresh();
         setError(explain(failure));
       } else if (id) {
-        setError('Confirmação pendente. Guarde a referência e acompanhe a situação deste pedido.');
+        setError('Falha de comunicação ao criar o checkout. Consulte a referência para verificar se o pedido foi criado.');
       } else setError(explain(failure));
     } finally {
       setBusy(false);
@@ -207,7 +239,7 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
               <SectionHeading icon={CreditCard} title="Pagamento" subtitle="Cartão de crédito" />
               <div className="brands" aria-label="Bandeiras sujeitas à habilitação da conta"><span className="visa">VISA</span><span className="mastercard" aria-label="Mastercard" /><span className="elo">elo</span><span className="amex">AMEX</span><span className="hiper">Hipercard</span></div>
             </div>
-            <label className="field">Parcelamento <select aria-label="Parcelamento" disabled={busy || saved || !shop.amount} value={Math.min(installments, count)} onChange={e => setInstallments(Number(e.target.value))}>
+            <label className="field">Parcelamento <select aria-label="Parcelamento" disabled={busy || (saved && !missing) || !shop.amount} value={Math.min(installments, count)} onChange={e => setInstallments(Number(e.target.value))}>
               {shop.amount ? Array.from({ length: count }, (_, index) => <option key={index} value={index + 1}>{installmentsLabel(shop.amount!, index + 1)}</option>) : <option value={1}>Aguardando valor da venda</option>}
             </select></label>
             <div className="payment-note"><LockKeyhole size={23} /><span><strong>Pagamento no checkout oficial da Pagar.me</strong><small>Ao finalizar, você será encaminhado na mesma aba para preencher os dados do cartão.</small></span><b className="pagarme">pagar.me</b></div>
@@ -215,16 +247,23 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
             {(loadError || (product && !shop.ready)) && <p className="notice" role="status">{loadError || 'O checkout está aguardando a liberação do lojista.'}</p>}
             {error && <p className="notice error" role="alert">{error}</p>}
             {saved && <div className="notice receipt" role="status">
-              <strong>{receipt ? statusLabel(receipt.status) : 'Confirmação pendente'}</strong>
+              <strong>{busy ? 'Criando checkout' : checkoutTitle}</strong>
               <span>Pedido {lastId}</span>
               {receipt?.status === 'declined' && <span>A transação foi recusada. Confira os dados do cartão ou consulte o emissor.{receipt.refusalCode ? ' Código: ' + receipt.refusalCode + '.' : ''}</span>}
-              {receipt?.status === 'request_failed' && <span>A solicitação não foi processada. Confira os dados ou contate o lojista.</span>}
-              {incomplete && <span>Acompanhe a confirmação usando a referência do pedido.</span>}
-              {receipt?.checkoutUrl && <a className="button primary" href={receipt.checkoutUrl}>CONTINUAR NA PAGAR.ME</a>}
-              {receipt && ['declined','request_failed','paid','captured','canceled','expired','refunded'].includes(receipt.status) && <button type="button" className="button secondary" onClick={newPurchase}>Nova compra</button>}
+              {receipt?.status === 'request_failed' && <span>Fale com o lojista e informe a referência do pedido.</span>}
+              {receipt?.reconciliation === 'pending' && receipt.status !== 'pending' && <span>Conciliação pendente com a Pagar.me.</span>}
+              {statusError && <span>{missing ? 'Você pode tentar com a mesma referência.' : 'Falha ao consultar o pedido. A consulta será repetida.'}</span>}
+              {receipt?.checkoutUrl && <><span>Aguardando pagamento no checkout da Pagar.me.</span>
+                <a className="button primary" href={receipt.checkoutUrl} onClick={event => {
+                  if (receipt.checkoutExpiresAt && Date.parse(receipt.checkoutExpiresAt) <= Date.now()) {
+                    event.preventDefault();
+                    setReceipt({ ...receipt, checkoutUrl: null, reconciliation: 'pending' });
+                  }
+                }}>CONTINUAR NA PAGAR.ME</a></>}
+              {receipt?.newPurchaseAllowed && <button type="button" className="button secondary" onClick={newPurchase}>Nova compra</button>}
             </div>}
-            <button className="button primary purchase" type="submit" disabled={busy || saved || !shop.ready}>
-              {busy ? <Loader /> : <LockKeyhole size={20} />} {busy ? 'PROCESSANDO' : 'FINALIZAR PAGAMENTO'}
+            <button className="button primary purchase" type="submit" disabled={busy || (saved && !missing) || !shop.ready}>
+              {busy ? <Loader /> : <LockKeyhole size={20} />} {busy ? 'CRIANDO CHECKOUT' : missing ? 'TENTAR COM A MESMA REFERÊNCIA' : 'FINALIZAR PAGAMENTO'}
             </button>
           </section>
         </form>

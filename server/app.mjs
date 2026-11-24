@@ -41,6 +41,10 @@ const csvCell = value => {
   return '"' + safe.replaceAll('"', '""') + '"';
 };
 
+function adminOrder({ checkout_url, ...row }) {
+  return { ...row, has_checkout_url: Boolean(checkout_url) };
+}
+
 export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetch }) {
   const app = express();
   app.disable('x-powered-by');
@@ -154,7 +158,7 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
     const env = parse(environment, req.params.env, 'Ambiente inválido.');
     const page = parse(z.coerce.number().int().min(1).max(100000), req.query.page ?? 1, 'Página inválida.');
     const { rows } = await db.query('SELECT * FROM cs_trp_013_v2.orders WHERE environment=$1 ORDER BY created_at DESC,id LIMIT 51 OFFSET $2', [env, (page - 1) * 50]);
-    res.json({ rows: rows.slice(0, 50), hasNext: rows.length > 50 });
+    res.json({ rows: rows.slice(0, 50).map(adminOrder), hasNext: rows.length > 50 });
   });
 
   app.get('/api/admin/report/:env', async (req, res) => {
@@ -171,23 +175,23 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
     const row = await payments.get(id);
     if (!row) throw new HttpError(404, 'Pedido não encontrado.');
     const { rows } = await db.query('SELECT * FROM cs_trp_013_v2.transactions WHERE order_id=$1 ORDER BY id DESC', [id]);
-    res.json({ row, events: rows });
+    res.json({ row: adminOrder(row), events: rows });
   });
 
   app.post('/api/admin/orders/:id/:action', security.limit('sales-operations', 35, 60), async (req, res) => {
     const { id, action } = req.params;
     const row = await payments.get(parse(uuidParam, id, 'Referência inválida.'));
     if (!row) throw new HttpError(404, 'Pedido não encontrado.');
-    if (action === 'refresh') return res.json(await payments.refresh(row));
+    if (action === 'refresh') return res.json(adminOrder(await payments.refresh(row)));
     const operation = parse(z.enum(['capture','cancel']), action, 'Ação inválida.');
     if (req.body?.confirmed !== true) throw new HttpError(422, 'Confirme a operação.');
-    res.json(await payments.operate(row, operation));
+    res.json(adminOrder(await payments.operate(row, operation)));
   });
 
   app.use((_req, _res, next) => next(new HttpError(404, 'Rota inexistente.')));
   app.use((error, _req, res, _next) => {
     if (error instanceof HttpError) return res.status(error.status).json({ message: error.message, ...error.data });
-    if (error instanceof ProviderError) return res.status(502).json({ message: 'A Pagar.me não concluiu a consulta. Concilie antes de repetir.', http: error.http });
+    if (error instanceof ProviderError) return res.status(502).json({ message: 'A Pagar.me não concluiu a consulta. Concilie antes de repetir.', http: error.http, category: error.category });
     if (error.type === 'entity.too.large') return res.status(413).json({ message: 'Solicitação muito grande.' });
     if (error.type === 'entity.parse.failed') return res.status(400).json({ message: 'JSON inválido.' });
     console.error('Falha interna CS TRP 013', { type: error.constructor?.name, code: /^[A-Z0-9]{5}$/.test(error.code ?? '') ? error.code : undefined });

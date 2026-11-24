@@ -2,8 +2,22 @@ import pg from 'pg';
 
 export function makePool(connectionString) {
   if (!connectionString) throw new Error('DATABASE_URL não configurada.');
+  let url;
+  try {
+    url = new URL(connectionString);
+  } catch {
+    throw new Error('DATABASE_URL inválida.');
+  }
+  if (!['postgres:', 'postgresql:'].includes(url.protocol) || !url.hostname) {
+    throw new Error('DATABASE_URL inválida.');
+  }
+  if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') {
+    throw new Error('A validação de certificados TLS precisa estar ativa.');
+  }
+  // Enforce certificate and hostname verification, including older Neon URLs.
+  url.searchParams.set('sslmode', 'verify-full');
   return new pg.Pool({
-    connectionString, enableChannelBinding: true, max: 4, connectionTimeoutMillis: 4500, idleTimeoutMillis: 10000
+    connectionString: url.href, enableChannelBinding: true, max: 4, connectionTimeoutMillis: 4500, idleTimeoutMillis: 10000
   });
 }
 

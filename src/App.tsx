@@ -7,7 +7,7 @@ import { Dashboard } from './pages/Dashboard';
 import { Settings } from './pages/Settings';
 import { Transactions } from './pages/Transactions';
 import { Loader, Modal } from './components/UI';
-import { ApiError, api, explain, type Environment, type Product } from './services/api';
+import { ApiError, adminSessionExpired, api, explain, type Environment, type Product } from './services/api';
 
 const tabs = [
   { key: 'gateway', label: 'Gateway' }, { key: 'dashboard', label: 'Dashboard' },
@@ -29,6 +29,11 @@ export default function App() {
       .catch(() => { setProduct(null); setLoadError('Não foi possível carregar a configuração do checkout.'); });
   }
   useEffect(refresh, []);
+  useEffect(() => {
+    const expire = () => setCsrf('');
+    window.addEventListener(adminSessionExpired, expire);
+    return () => window.removeEventListener(adminSessionExpired, expire);
+  }, []);
 
   function open() {
     setTab('gateway');

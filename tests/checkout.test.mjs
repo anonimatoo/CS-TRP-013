@@ -105,6 +105,7 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
     assert.notEqual(raw.rows[0].secret, firstKey);
     assert.equal((await keyAction('test')).json.http, 200);
     assert.equal(app.remote.linkPosts, 0);
+    assert.equal((await req('/admin/gateway/test')).json.checkoutCreationVerifiedAt, null);
     assert.equal((await keyAction('activate', { confirmed: false })).status, 422);
     assert.equal((await keyAction('activate', { confirmed: true })).json.enabled, true);
     assert.equal((await updateProduct({ ...product, price: '1.50' })).status, 422);
@@ -151,7 +152,7 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
     assert.equal(declined.status, 'declined');
     assert.equal(declined.refusalCode, '0051');
     assert.ok(!('refusalReason' in declined));
-    assert.equal((await req('/admin/orders/' + declined.id)).json.row.refusal_reason, 'Recusa do fixture local');
+    assert.equal((await req('/admin/orders/' + declined.id)).json.row.refusal_reason, 'Pagamento recusado pela Pagar.me.');
   });
 
   await t.test('conciliação de falha ambígua, webhook autenticado e deduplicado', async () => {
@@ -159,7 +160,7 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
     app.remote.nextLinkFault = 'timeout';
     assert.equal((await post('/orders', uncertain)).json.status, 'communication_error');
     const before = app.remote.linkPosts;
-    assert.equal((await post('/orders', uncertain)).json.status, 'communication_error');
+    assert.equal((await post('/orders', uncertain)).json.status, 'pending');
     assert.equal(app.remote.linkPosts, before);
     const resumed = (await req('/orders/' + uncertain.id)).json;
     assert.equal(resumed.status, 'pending');

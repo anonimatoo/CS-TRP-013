@@ -25,40 +25,63 @@ export function makeGateway(db, config, pagarme) {
   const meta = row => ({
     environment: row.environment, hasKey: Boolean(row.secret), enabled: row.enabled, connected: row.last_ok,
     testedAt: row.tested_at, updatedAt: row.updated_at, http: row.last_http, message: row.last_message,
+    authenticated: row.last_authenticated ?? (row.last_ok ? true : row.last_http === 401 ? false : null),
+    checkoutReadable: row.checkout_readable ?? (row.last_ok ? true : null),
+    readError: row.last_error ?? null,
+    checkoutCreationVerifiedAt: row.checkout_creation_verified_at ?? null,
+    checkoutAttemptedAt: row.checkout_attempted_at ?? null,
+    checkoutHttp: row.checkout_http ?? null,
+    checkoutError: row.checkout_error ?? null,
     activationBlock: activationBlock(row.environment)
   });
 
   async function probe(key, account, anchor) {
-    let response;
-    let observedAccount;
+    const paths = ['/orders?size=1','/charges?size=1','/hooks?size=1','/paymentlinks?per_page=1'];
+    const results = await Promise.allSettled(paths.map(path => pagarme(key, path)));
+    const [orders, charges, hooks, links] = results.map(result => result.value);
+    const authenticated = results.some(result => result.status === 'fulfilled') ? true :
+      results.some(result => result.reason?.http === 401) ? false : null;
+    const checkoutReadable = links ? true : [401,403].includes(results[3].reason?.http) ? false : null;
+    const checked = { authenticated, checkoutReadable };
     try {
-      for (const path of ['/orders?size=1','/charges?size=1','/hooks?size=1', '/paymentlinks?per_page=1']) {
-        response = await pagarme(key, path, { hosted: true });
-        if (path === '/hooks?size=1') {
-          observedAccount = accountId.safeParse(response.data?.data?.[0]?.account?.id).data;
-          if (observedAccount && account && observedAccount !== account) {
-            return { connected: false, http: response.http, message: 'A conta do webhook retornado diverge do identificador informado.' };
-          }
-        }
+      const failed = results.find(result => result.status === 'rejected');
+      if (failed) throw failed.reason;
+      for (const result of [orders, charges, hooks]) {
+        if (!Array.isArray(result.data?.data)) throw new ProviderError(result.http, 'provider_invalid_json');
+      }
+      if (!links.data || typeof links.data !== 'object') throw new ProviderError(links.http, 'provider_invalid_json');
+      const observedAccount = accountId.safeParse(hooks.data.data[0]?.account?.id).data;
+      if (observedAccount && account && observedAccount !== account) {
+        throw new ProviderError(hooks.http, 'gateway_account_mismatch');
       }
       if (anchor?.provider_order) {
-        const result = await pagarme(key, '/orders/' + anchor.provider_order, { hosted: anchor.hosted_checkout });
+        const result = await pagarme(key, '/orders/' + anchor.provider_order);
         if (result.data?.id !== anchor.provider_order || result.data?.code !== anchor.id) {
-          return { connected: false, http: result.http, message: 'O pedido de referência não pertence à credencial fornecida.' };
+          throw new ProviderError(result.http, 'gateway_account_mismatch');
         }
-      }
-      if (anchor?.checkout_provider_id) {
+      } else if (anchor?.checkout_provider_id) {
         const result = await pagarme(key, '/paymentlinks/' + anchor.checkout_provider_id);
         if (result.data?.id !== anchor.checkout_provider_id || result.data?.name !== hostedCheckoutName(anchor.id)) {
-          return { connected: false, http: result.http, message: 'O checkout de referência não pertence à credencial fornecida.' };
+          throw new ProviderError(result.http, 'gateway_account_mismatch');
+        }
+      } else if (anchor && (!observedAccount || observedAccount !== account)) {
+        const pending = await pagarme(key, '/orders?size=2&code=' + anchor.id);
+        if (!Array.isArray(pending.data?.data) || !pending.data.data.some(order => order?.code === anchor.id && order.amount === anchor.amount)) {
+          throw new ProviderError(pending.http, 'gateway_account_unverified');
         }
       }
-      return { connected: true, account: observedAccount ?? account, http: response.http, message: response.data?.message === 'OK'
-        ? 'OK' : 'Pagar.me respondeu às consultas autenticadas de leitura.' };
+      return { ...checked, connected: true, account: observedAccount ?? account, http: links.http, category: null,
+        message: 'Pagar.me respondeu às consultas autenticadas de leitura.' };
     } catch (error) {
       if (!(error instanceof ProviderError)) throw error;
-      return { connected: false, http: error.http, message: error.providerMessage ??
-        (error.http ? 'A consulta à Pagar.me retornou HTTP ' + error.http + '.' : 'A Pagar.me não respondeu à consulta.') };
+      const messages = {
+        provider_authentication: 'A Pagar.me recusou a autenticação da Secret Key.',
+        provider_permission: 'A Secret Key não tem permissão para uma das consultas da Pagar.me.',
+        gateway_account_mismatch: 'A conta ou a referência consultada diverge do histórico local.',
+        gateway_account_unverified: 'A nova credencial ainda não comprova vínculo com o pedido em aberto.'
+      };
+      return { ...checked, connected: false, http: error.http, category: error.category,
+        message: messages[error.category] ?? 'Não foi possível confirmar as consultas de leitura da Pagar.me.' };
     }
   }
 
@@ -81,18 +104,12 @@ export function makeGateway(db, config, pagarme) {
       const label = secretEnvironment === 'test' ? 'Sandbox' : 'Produção';
       throw new HttpError(422, 'A Secret Key (SK) é de ' + label + '. Selecione esse ambiente para cadastrá-la.');
     }
-    const history = await one(db, `SELECT account, provider_order, checkout_provider_id, hosted_checkout, id FROM cs_trp_013_v2.orders
+    const history = await one(db, `SELECT account, provider_order, checkout_provider_id, id, amount FROM cs_trp_013_v2.orders
       WHERE environment=$1 AND status <> 'request_failed'
       ORDER BY (provider_order IS NOT NULL OR checkout_provider_id IS NOT NULL) DESC, created_at DESC LIMIT 1`, [env]);
     const knownAccount = (before.secret || history ? before.account : null) ?? history?.account;
-    if (history && !history.provider_order && !history.checkout_provider_id) {
-      const pending = await pagarme(secret, '/orders?size=2&code=' + history.id, { hosted: history.hosted_checkout }).catch(() => null);
-      if (!pending?.data?.data?.some(order => order.code === history.id)) {
-        throw new HttpError(409, 'Concilie o pedido em aberto antes de trocar a configuração.');
-      }
-    }
     const checked = await probe(secret, knownAccount, history);
-    if (!checked.connected) throw new HttpError(422, checked.message, { http: checked.http });
+    if (!checked.connected) throw new HttpError(422, checked.message, { http: checked.http, category: checked.category });
     const account = checked.account ?? null;
     const sealed = encrypt(config.encryptionKey, secret, context(env, account));
     return db.tx(async client => {
@@ -104,8 +121,10 @@ export function makeGateway(db, config, pagarme) {
       }
       const row = await one(client, `UPDATE cs_trp_013_v2.gateway SET
         account=$2,secret=$3,last_ok=true,last_http=$4,last_message=$5,
+        last_authenticated=$6,checkout_readable=$7,last_error=NULL,
+        checkout_creation_verified_at=NULL,checkout_attempted_at=NULL,checkout_http=NULL,checkout_error=NULL,
         tested_at=now(),updated_at=now(),version=version+1 WHERE environment=$1 RETURNING *`,
-      [env, account, sealed, checked.http, checked.message]);
+      [env, account, sealed, checked.http, checked.message, checked.authenticated, checked.checkoutReadable]);
       await audit(client, 'gateway.' + action, { environment: env, account });
       return meta(row);
     });
@@ -118,8 +137,10 @@ export function makeGateway(db, config, pagarme) {
     return db.tx(async client => {
       await checkVersion(client, before);
       const row = await one(client, `UPDATE cs_trp_013_v2.gateway SET
-        last_ok=$2,last_http=$3,last_message=$4,tested_at=now(),enabled=(enabled AND $2),version=version+1
-        WHERE environment=$1 RETURNING *`, [env, checked.connected, checked.http, checked.message]);
+        last_ok=$2,last_http=$3,last_message=$4,last_error=$5,last_authenticated=$6,checkout_readable=$7,
+        tested_at=now(),enabled=(enabled AND $2),version=version+1
+        WHERE environment=$1 RETURNING *`,
+      [env, checked.connected, checked.http, checked.message, checked.category, checked.authenticated, checked.checkoutReadable]);
       await audit(client, 'gateway.test', { environment: env, connected: checked.connected, http: checked.http });
       return meta(row);
     });
@@ -141,6 +162,8 @@ export function makeGateway(db, config, pagarme) {
       const row = action === 'disconnect'
         ? await one(client, `UPDATE cs_trp_013_v2.gateway SET
             secret=NULL,public_key=NULL,last_ok=NULL,last_http=NULL,last_message=NULL,tested_at=NULL,
+            last_error=NULL,last_authenticated=NULL,checkout_readable=NULL,
+            checkout_creation_verified_at=NULL,checkout_attempted_at=NULL,checkout_http=NULL,checkout_error=NULL,
             enabled=false,updated_at=now(),version=version+1 WHERE environment=$1 RETURNING *`, [env])
         : await one(client, `UPDATE cs_trp_013_v2.gateway SET
             enabled=$2,updated_at=now(),version=version+1 WHERE environment=$1 RETURNING *`, [env, action === 'activate']);

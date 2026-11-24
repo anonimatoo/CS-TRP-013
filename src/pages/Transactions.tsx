@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react';
-import { api, brl, dateTime, explain, statusLabel, type Environment } from '../services/api';
+import { api, brl, dateTime, explain, providerErrorLabel, reconciliations, statusLabel, type Environment } from '../services/api';
 import { Loader } from '../components/UI';
 
 interface Row {
   id: string; account: string | null; status: string; amount: number; installments: number; created_at: string;
   provider_order: string | null; checkout_provider_id: string | null; provider_charge: string | null; provider_status: string | null;
+  has_checkout_url: boolean; checkout_expires_at: string | null; checkout_attempted_at: string | null;
+  checkout_http: number | null; checkout_error: string | null; reconciliation_state: string | null;
+  reconciliation_http: number | null; reconciliation_error: string | null; reconciliation_at: string | null;
   refusal_code: string | null; refusal_reason: string | null; http_status: number | null;
 }
 type Event = { id: number; provider_id: string | null; status: string; created_at: string };
@@ -38,7 +41,10 @@ export function Transactions({ env, csrf }: { env: Environment; csrf: string }) 
       await api('/admin/orders/' + details.row.id + '/' + action, { method: 'POST', csrf, body: { confirmed: true } });
       await open(details.row.id);
       await load();
-    } catch (failure) { setError(explain(failure)); setConfirm(undefined); }
+    } catch (failure) {
+      await open(details.row.id);
+      setError(explain(failure));
+    }
     finally { setBusy(false); }
   }
 
@@ -64,9 +70,20 @@ export function Transactions({ env, csrf }: { env: Environment; csrf: string }) 
         <div><dt>Pedido local</dt><dd>{details.row.id}</dd></div>
         <div><dt>Conta comercial</dt><dd>{details.row.account ?? '—'}</dd></div>
         <div><dt>Checkout Pagar.me</dt><dd>{details.row.checkout_provider_id ?? '—'}</dd></div>
+        <div><dt>Pedido Pagar.me</dt><dd>{details.row.provider_order ?? '—'}</dd></div>
+        <div><dt>URL de checkout registrada</dt><dd>{details.row.has_checkout_url ? 'Sim' : 'Não'}</dd></div>
+        <div><dt>Validade do checkout</dt><dd>{dateTime(details.row.checkout_expires_at)}</dd></div>
         <div><dt>Cobrança Pagar.me</dt><dd>{details.row.provider_charge ?? '—'}</dd></div>
         <div><dt>Status do provedor</dt><dd>{details.row.provider_status ?? '—'}</dd></div>
-        <div><dt>Resposta HTTP</dt><dd>{details.row.http_status ?? '—'}</dd></div>
+        <div><dt>HTTP registrado no pedido</dt><dd>{details.row.http_status ?? '—'}</dd></div>
+        <div><dt>HTTP da criação do checkout</dt><dd>{details.row.checkout_http ?? '—'}</dd></div>
+        <div><dt>Tentativa de criação</dt><dd>{dateTime(details.row.checkout_attempted_at)}</dd></div>
+        <div><dt>Falha na criação</dt><dd>{providerErrorLabel(details.row.checkout_error)}</dd></div>
+        <div><dt>Conciliação</dt><dd>{reconciliations[details.row.reconciliation_state ??
+          (details.row.status === 'communication_error' ? 'pending' : '')] ?? '—'}</dd></div>
+        <div><dt>Última conciliação</dt><dd>{dateTime(details.row.reconciliation_at)}</dd></div>
+        <div><dt>HTTP da conciliação</dt><dd>{details.row.reconciliation_http ?? '—'}</dd></div>
+        <div><dt>Falha na conciliação</dt><dd>{providerErrorLabel(details.row.reconciliation_error)}</dd></div>
         <div><dt>Código de recusa</dt><dd>{details.row.refusal_code ?? '—'}</dd></div>
         <div className="span-full"><dt>Motivo informado pelo provedor</dt><dd>{details.row.refusal_reason ?? '—'}</dd></div>
       </dl>

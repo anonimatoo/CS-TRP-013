@@ -62,7 +62,7 @@ try {
   await modal.getByText('Conectado e ativado').waitFor();
   await secretField.fill(wrongKey);
   await modal.getByRole('button', { name: 'SUBSTITUIR CHAVE SK' }).click();
-  await modal.getByRole('alert').getByText(/Invalid API key/).waitFor();
+  await modal.getByRole('alert').getByText(/recusou a autenticação/).waitFor();
   await modal.getByText('Conectado e ativado').waitFor();
   await secretField.fill(secondKey);
   await modal.getByRole('button', { name: 'SUBSTITUIR CHAVE SK' }).click();
@@ -76,13 +76,17 @@ try {
   await modal.getByRole('button', { name: 'FECHAR', exact: true }).click();
   assert.equal(await page.getByLabel('Nome completo').inputValue(), 'COMPRADOR TESTE');
 
-  await page.getByLabel('CPF').fill('52998224725');
-  await page.getByLabel('E-mail').fill('comprador@example.com');
-  await page.getByLabel('Celular com DDD').fill('11900000000');
-  await page.getByLabel('CEP').fill('01001000');
-  await page.getByText('Endereço consultado. Confira os dados.').waitFor();
-  assert.equal(await page.getByLabel('Rua', { exact: false }).inputValue(), 'Praça da Sé');
-  await page.getByPlaceholder('Nº').fill('1');
+  async function fillBuyer() {
+    await page.getByLabel('Nome completo').fill('Comprador Teste');
+    await page.getByLabel('CPF').fill('52998224725');
+    await page.getByLabel('E-mail').fill('comprador@example.com');
+    await page.getByLabel('Celular com DDD').fill('11900000000');
+    await page.getByLabel('CEP').fill('01001000');
+    await page.getByText('Endereço consultado. Confira os dados.').waitFor();
+    assert.equal(await page.getByLabel('Rua', { exact: false }).inputValue(), 'Praça da Sé');
+    await page.getByPlaceholder('Nº').fill('1');
+  }
+  await fillBuyer();
 
   assert.equal(await page.getByLabel('Número do cartão').count(), 0);
   await page.route('https://payment-link.pagar.me/**', async route => {
@@ -91,7 +95,7 @@ try {
     assert.ok(link);
     await route.fulfill({
       contentType: 'text/html; charset=utf-8',
-      body: '<h1>Pagar.me (provedor de teste)</h1><a href="' + app.origin + '/?pedido=' + link.order_code + '">Voltar à loja</a>'
+      body: '<h1>Pagar.me (provedor de teste)</h1><a href="' + app.origin + '/?pedido=' + app.remote.linkCodes.get(link.id) + '">Voltar à loja</a>'
     });
   });
   await page.getByRole('button', { name: 'FINALIZAR PAGAMENTO' }).click();
@@ -100,7 +104,7 @@ try {
   assert.equal(page.context().pages().length, 1);
   assert.equal(app.remote.linkPosts, 1);
   const link = [...app.remote.links.values()][0];
-  app.remote.complete(link.order_code);
+  app.remote.complete(app.remote.linkCodes.get(link.id));
   await page.getByRole('link', { name: 'Voltar à loja' }).click();
   await page.getByText('Pagamento aprovado', { exact: true }).waitFor();
   assert.ok(!ownRequests.some(body => body.includes('"token"') || body.includes('"cvv"') || body.includes('"holder_name"')));
@@ -110,6 +114,26 @@ try {
   await page.reload();
   await page.getByText('Pagamento aprovado', { exact: true }).waitFor();
   await page.getByRole('button', { name: 'Nova compra' }).click();
+  await fillBuyer();
+  app.remote.nextLinkFault = 'timeout';
+  app.remote.checkoutLookup = () => Response.json({ data: [] });
+  await page.getByRole('button', { name: 'FINALIZAR PAGAMENTO' }).click();
+  await page.getByText('Falha ao confirmar o checkout', { exact: true }).waitFor();
+  await page.getByText('Conciliação pendente com a Pagar.me.').waitFor();
+  const pendingReference = new URL(page.url()).searchParams.get('pedido');
+  assert.ok(pendingReference);
+  assert.equal(await page.getByRole('link', { name: 'CONTINUAR NA PAGAR.ME' }).count(), 0);
+  app.remote.checkoutLookup = null;
+  await app.db.query('UPDATE cs_trp_013_v2.orders SET checkout_synced_at=NULL WHERE id=$1', [pendingReference]);
+  await page.getByRole('link', { name: 'CONTINUAR NA PAGAR.ME' }).click();
+  await page.waitForURL('https://payment-link.pagar.me/**');
+  assert.equal(app.remote.linkPosts, 2);
+  app.remote.complete(pendingReference, 'failed');
+  await app.db.query('UPDATE cs_trp_013_v2.orders SET checkout_synced_at=NULL WHERE id=$1', [pendingReference]);
+  await page.getByRole('link', { name: 'Voltar à loja' }).click();
+  await page.getByText('Pagamento recusado', { exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Nova compra' }).click();
+
 
   await page.getByRole('button', { name: /CONECTAR CHAVE SK/ }).click();
   await modal.getByRole('button', { name: 'DESATIVAR GATEWAY' }).click();
@@ -135,6 +159,9 @@ try {
   if (process.env.BROWSER_SCREENSHOT_DIR) {
     await page.screenshot({ path: process.env.BROWSER_SCREENSHOT_DIR + '/mobile.png', fullPage: true });
   }
+  await app.db.query("UPDATE cs_trp_013_v2.sessions SET expires_at=now()-interval '1 second'");
+  await modal.getByRole('button', { name: 'Transações', exact: true }).click();
+  await passwordInput.waitFor();
   await page.keyboard.press('Escape');
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
   assert.deepEqual(errors, []);
