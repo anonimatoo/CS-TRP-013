@@ -97,16 +97,6 @@ svg { flex-shrink: 0; vertical-align: middle; }
 .amex, .hiper { padding: 0 3px; border-radius: 2px; color: white; font-weight: 850; line-height: 14px; }
 .amex { background: #1275c4; font-size: .59rem; }
 .hiper { background: #a6222b; font-size: .58rem; font-style: italic; }
-.detected-brand { display: none; color: var(--muted); font-size: .79rem; }
-.payment-flow { display: grid; grid-template-columns: minmax(0, 2.04fr) minmax(170px, .95fr); gap: 20px; align-items: start; }
-.card-graphic {
-  margin-top: 15px; width: 100%; aspect-ratio: 1.86; border-radius: 17px; background: linear-gradient(164deg, #0d1930 19%, #254670 28%, #1367ae 29%, #12213e 31%, #0d192d 65%, #194686 81%, #532aca 83%, #0a1429 86%);
-  padding: 12% 11% 8%; color: #fff; border: 1px solid #3b557b; position: relative; box-shadow: 0 9px 16px #1d32534b;
-}
-.card-graphic svg { position: absolute; top: 17%; right: 9%; color: #edf6ff; }
-.chip { display: block; height: 18%; width: 19%; min-height: 16px; border-radius: 4px; background: linear-gradient(140deg, #fff2a4, #e0aa41 55%, #f8ce70); }
-.card-digits { white-space: nowrap; font-size: clamp(.65rem, 1.1vw, .95rem); letter-spacing: .13em; margin-top: 10%; }
-.card-graphic small { display: block; color: #edf5ff; font-size: .67rem; margin-top: 5%; }
 .payment-note { margin: 13px 0 11px; padding: 10px 12px; display: flex; align-items: center; gap: 11px; border-radius: 9px; background: #e3edf9; }
 .payment-note strong, .payment-note small, .safe-card strong, .safe-card small { display: block; }
 .payment-note strong { font-size: .86rem; }
@@ -165,9 +155,6 @@ svg { flex-shrink: 0; vertical-align: middle; }
 .gateway-facts dt, .dashboard span { color: var(--muted); font-size: .77rem; font-weight: 650; }
 .gateway-facts dd { margin: 2px 0 0; overflow-wrap: anywhere; font-size: .86rem; font-weight: 760; }
 .admin-fields { margin: 14px 0; }
-.gateway-checkout-settings { margin-top: 18px; }
-.gateway-checkout-settings summary { color: #344665; cursor: pointer; font-weight: 700; }
-.gateway-checkout-settings .help { margin-top: 8px; }
 .gateway-actions { display: flex; flex-wrap: wrap; gap: 7px; }
 .gateway-actions .button { flex: 1 1 30%; }
 .notice { padding: 9px 11px; margin: 8px 0; border-radius: 8px; border: 1px solid #d9dfe8; background: #edf1f7; color: #334665; font-size: .85rem; line-height: 1.36; }
@@ -199,15 +186,11 @@ th { background: #e8f0fb; }
   .header-inner { gap: 20px; }
   .header-security { padding-left: 17px; }
   .form-panel { padding-inline: 13px; }
-  .payment-flow { gap: 12px; }
 }
 @media (max-width: 880px) {
   .header-benefits { display: none; }
   .container { padding-inline: 13px; }
   .checkout-grid { gap: 11px; grid-template-columns: minmax(0, 1.6fr) minmax(252px, 1fr); }
-  .payment-flow { grid-template-columns: minmax(0,1fr); }
-  .card-graphic { display: none; }
-  .detected-brand { display: inline; }
   .payment-heading { flex-wrap: wrap; margin-bottom: 7px; }
   .payment-heading .section-heading { margin-bottom: 0; }
   .cep-row { grid-template-columns: minmax(0,1fr) max-content; }
@@ -245,7 +228,6 @@ th { background: #e8f0fb; }
 @media (max-width: 400px) {
   .header-security { max-width: 105px; }
   .form-panel { padding-inline: 10px; }
-  .payment-flow .fields.two { align-items: end; }
   .fields.two { gap: 8px; }
   .fields.address { grid-template-columns: 1fr; }
   .cep-row .button { padding-inline: 7px; }

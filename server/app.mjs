@@ -2,7 +2,7 @@ import express from 'express';
 import helmet from 'helmet';
 import { z } from 'zod';
 import { audit, one } from './db.mjs';
-import { checkoutConfigured, environment, gatewayRow, makeGateway } from './gateway.mjs';
+import { environment, gatewayRow, makeGateway } from './gateway.mjs';
 import { makePagarme, ProviderError } from './pagarme.mjs';
 import { makePayments, payment, productRow, publicOrder } from './payments.mjs';
 import { equalSecret, HttpError, makeSecurity } from './security.mjs';
@@ -11,7 +11,7 @@ import { parseBrl, states } from '../shared/validation.mjs';
 export const policy = {
   defaultSrc: ["'none'"], baseUri: ["'none'"], objectSrc: ["'none'"], frameAncestors: ["'none'"],
   scriptSrc: ["'self'"], styleSrc: ["'self'"], imgSrc: ["'self'", 'https:'],
-  connectSrc: ["'self'", 'https://api.pagar.me'], fontSrc: ["'self'"], formAction: ["'none'"]
+  connectSrc: ["'self'"], fontSrc: ["'self'"], formAction: ["'none'"]
 };
 
 const shopForm = z.object({
@@ -59,9 +59,9 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
   app.get('/api/checkout', async (_req, res) => {
     const product = await productRow(db);
     const current = await gatewayRow(db, product.environment);
-    const ready = Boolean(product.enabled && product.amount && current.enabled && current.last_ok && current.secret && checkoutConfigured(current) &&
+    const ready = Boolean(product.enabled && product.amount && current.enabled && current.last_ok && current.secret &&
       (current.environment !== 'live' || config.allowLive));
-    res.json({ ...safeShop(product), ready, gatewayVersion: current.version, publicKey: ready ? current.public_key : null });
+    res.json({ ...safeShop(product), ready, gatewayVersion: current.version });
   });
 
   app.get('/api/cep/:cep', security.limit('cep', 60, 60), async (req, res) => {
@@ -91,7 +91,7 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
   app.get('/api/orders/:id', security.limit('status', 90, 60), async (req, res) => {
     const row = await payments.get(parse(uuidParam, req.params.id, 'Referência inválida.'));
     if (!row) throw new HttpError(404, 'Pedido não encontrado.');
-    res.json(publicOrder(row));
+    res.json(publicOrder(await payments.status(row)));
   });
 
   app.post('/api/hooks/pagarme/:secret', async (req, res, next) => {
@@ -113,8 +113,8 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
   });
   app.post('/api/admin/gateway/:env/:action', security.limit('gateway', 25, 60), async (req, res) => {
     const env = parse(environment, req.params.env, 'Ambiente inválido.');
-    const action = parse(z.enum(['add','replace','configure','test','activate','disable','disconnect']), req.params.action, 'Ação inválida.');
-    if (['add','replace','configure'].includes(action)) return res.json(await gateway.save(env, action, req.body));
+    const action = parse(z.enum(['add','replace','test','activate','disable','disconnect']), req.params.action, 'Ação inválida.');
+    if (action === 'add' || action === 'replace') return res.json(await gateway.save(env, action, req.body));
     if (action === 'test') return res.json(await gateway.test(env));
     res.json(await gateway.change(env, action, req.body));
   });
@@ -159,10 +159,10 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
 
   app.get('/api/admin/report/:env', async (req, res) => {
     const env = parse(environment, req.params.env, 'Ambiente inválido.');
-    const { rows } = await db.query(`SELECT id,created_at,amount,installments,status,provider_order,provider_charge,
+    const { rows } = await db.query(`SELECT id,created_at,amount,installments,status,checkout_provider_id,provider_order,provider_charge,
       refusal_code,refusal_reason FROM cs_trp_013_v2.orders WHERE environment=$1 ORDER BY created_at DESC LIMIT 10001`, [env]);
     if (rows.length > 10000) throw new HttpError(422, 'O volume excede o limite de exportação de 10.000 registros.');
-    const heading = ['Pedido','Data UTC','Valor centavos','Parcelas','Status','Pedido Pagar.me','Cobrança Pagar.me','Código','Motivo'];
+    const heading = ['Pedido','Data UTC','Valor centavos','Parcelas','Status','Checkout Pagar.me','Pedido Pagar.me','Cobrança Pagar.me','Código','Motivo'];
     res.attachment('cs-trp-013-' + env + '.csv').type('text/csv').send('\uFEFF' + [heading, ...rows.map(Object.values)].map(row => row.map(csvCell).join(';')).join('\r\n'));
   });
 

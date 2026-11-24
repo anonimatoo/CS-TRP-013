@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { chromium } from 'playwright';
-import { fixture, account, firstKey, liveKey, password, publicKey, secondKey, wrongKey } from './fixture.mjs';
+import { fixture, firstKey, liveKey, password, secondKey, wrongKey } from './fixture.mjs';
 
 const app = await fixture({ browser: true });
 let browser;
@@ -42,27 +42,23 @@ try {
   assert.equal(await secretField.inputValue(), liveKey);
   assert.equal(await secretField.evaluate(field => field === document.activeElement), true);
   await modal.getByRole('button', { name: 'ADICIONAR CHAVE' }).click();
-  await modal.getByText('Aguardando tokenização', { exact: true }).waitFor();
-  assert.equal(await modal.getByRole('button', { name: 'ATIVAR GATEWAY', exact: true }).isEnabled(), false);
+  await modal.getByText('Gateway desativado', { exact: true }).waitFor();
+  await modal.getByRole('button', { name: 'ATIVAR GATEWAY', exact: true }).click();
+  await modal.getByRole('checkbox', { name: /Confirmei que a Secret Key/ }).check();
+  await modal.getByRole('button', { name: 'Confirmar', exact: true }).click();
+  await modal.getByRole('alert').getByText(/Pagamentos de produção estão bloqueados/).waitFor();
   await secretField.fill(firstKey);
   await modal.getByText('Ambiente identificado: Sandbox.', { exact: true }).waitFor();
   assert.equal(await environment.inputValue(), 'test');
   assert.equal(await modal.getByLabel('Chave pública para tokenização').isVisible(), false);
   await modal.getByRole('button', { name: 'ADICIONAR CHAVE' }).click();
-  await modal.getByText('Aguardando tokenização', { exact: true }).waitFor();
+  await modal.getByText('Secret Key cadastrada e validada.', { exact: true }).waitFor();
   assert.equal(await secretField.inputValue(), '');
   await modal.getByRole('button', { name: 'TESTAR CONEXÃO' }).click();
   await modal.locator('[role=status]').getByText('Pagar.me respondeu às consultas autenticadas de leitura.').waitFor();
-  const activate = modal.getByRole('button', { name: 'ATIVAR GATEWAY', exact: true });
-  assert.equal(await activate.isEnabled(), false);
-  await modal.getByText('Configuração da tokenização', { exact: true }).click();
-  await modal.getByLabel('Chave pública para tokenização').fill(publicKey);
-  await modal.getByLabel('Identificador da conta Pagar.me').fill(account);
-  await modal.getByRole('button', { name: 'SALVAR TOKENIZAÇÃO' }).click();
-  await modal.getByText('Configuração de tokenização salva.').waitFor();
-  await modal.getByText('Configuração da tokenização', { exact: true }).click();
-  await activate.click();
-  await modal.getByRole('checkbox', { name: /Confirmei as permissões/ }).check();
+  assert.equal(await modal.getByLabel('Identificador da conta Pagar.me').count(), 0);
+  await modal.getByRole('button', { name: 'ATIVAR GATEWAY', exact: true }).click();
+  await modal.getByRole('checkbox', { name: /Confirmei que a Secret Key/ }).check();
   await modal.getByRole('button', { name: 'Confirmar', exact: true }).click();
   await modal.getByText('Conectado e ativado').waitFor();
   await secretField.fill(wrongKey);
@@ -89,22 +85,26 @@ try {
   assert.equal(await page.getByLabel('Rua', { exact: false }).inputValue(), 'Praça da Sé');
   await page.getByPlaceholder('Nº').fill('1');
 
-  const sandboxCard = '4000000000000010';
-  let tokenCalls = 0;
-  await page.route('https://api.pagar.me/core/v5/tokens?*', async route => {
-    tokenCalls++;
-    assert.equal(route.request().postDataJSON().card.number, sandboxCard);
-    await route.fulfill({ json: { id: 'token_BrowserTest' }, headers: { 'Access-Control-Allow-Origin': app.origin } });
+  assert.equal(await page.getByLabel('Número do cartão').count(), 0);
+  await page.route('https://payment-link.pagar.me/**', async route => {
+    const id = new URL(route.request().url()).pathname.slice(1);
+    const link = app.remote.links.get(id);
+    assert.ok(link);
+    await route.fulfill({
+      contentType: 'text/html; charset=utf-8',
+      body: '<h1>Pagar.me (provedor de teste)</h1><a href="' + app.origin + '/?pedido=' + link.order_code + '">Voltar à loja</a>'
+    });
   });
-  await page.getByLabel('Número do cartão').fill(sandboxCard);
-  await page.getByLabel('Nome impresso no cartão').fill('Portador Teste');
-  await page.getByLabel('Validade (MM/AA)').fill('1235');
-  await page.getByLabel('CVV').fill('123');
   await page.getByRole('button', { name: 'FINALIZAR PAGAMENTO' }).click();
+  await page.waitForURL('https://payment-link.pagar.me/**');
+  await page.getByRole('heading', { name: 'Pagar.me (provedor de teste)' }).waitFor();
+  assert.equal(page.context().pages().length, 1);
+  assert.equal(app.remote.linkPosts, 1);
+  const link = [...app.remote.links.values()][0];
+  app.remote.complete(link.order_code);
+  await page.getByRole('link', { name: 'Voltar à loja' }).click();
   await page.getByText('Pagamento aprovado', { exact: true }).waitFor();
-  assert.equal(tokenCalls, 1);
-  assert.equal(app.remote.chargePosts, 1);
-  assert.ok(!ownRequests.some(body => body.includes(sandboxCard) || body.includes('"cvv"') || body.includes('"holder_name"')));
+  assert.ok(!ownRequests.some(body => body.includes('"token"') || body.includes('"cvv"') || body.includes('"holder_name"')));
   if (process.env.BROWSER_SCREENSHOT_DIR) {
     await page.screenshot({ path: process.env.BROWSER_SCREENSHOT_DIR + '/desktop.png', fullPage: true });
   }
@@ -139,7 +139,7 @@ try {
   await page.keyboard.press('Escape');
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
   assert.deepEqual(errors, []);
-  console.log('Chromium: checkout, modal, autenticação, credenciais, pagamento simulado em fixture, ViaCEP, saída e responsividade (1448/768/390/320 px).');
+  console.log('Chromium: checkout, modal, autenticação, credenciais, redirecionamento na mesma aba e pagamento simulado, ViaCEP, saída e responsividade (1448/768/390/320 px).');
 } finally {
   await browser?.close();
   await app.close();

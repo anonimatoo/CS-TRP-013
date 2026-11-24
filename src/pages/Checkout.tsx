@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import cardType from 'credit-card-type';
-import { BadgeCheck, Barcode, Check, CreditCard, Hash, Headset, Info, Laptop, LockKeyhole, Mail, MapPin, Phone, Search, Settings, ShieldCheck, Truck, UserRound, WalletCards } from 'lucide-react';
-import { digits, luhn, states, validCpf } from '../../shared/validation.mjs';
+import { BadgeCheck, Barcode, Check, CreditCard, Hash, Headset, Info, Laptop, LockKeyhole, Mail, MapPin, Phone, Search, Settings, ShieldCheck, Truck, UserRound } from 'lucide-react';
+import { digits, states, validCpf } from '../../shared/validation.mjs';
 import { ApiError, api, brl, explain, statusLabel, type Product, type Receipt } from '../services/api';
 import { Field, Loader, SectionHeading } from '../components/UI';
 
@@ -11,6 +10,7 @@ const defaultProduct = {
 } satisfies Product;
 const emptyBuyer = { name: '', cpf: '', email: '', phone: '', cep: '', street: '', number: '', complement: '', neighborhood: '', city: '', state: '', country: 'BR' };
 const receiptKey = 'cs013.receipt';
+const orderReference = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 
 function receiptStorage(id?: string) {
   try {
@@ -21,6 +21,15 @@ function receiptStorage(id?: string) {
     return '';
   }
   return '';
+}
+
+function currentReceipt() {
+  const returned = new URLSearchParams(window.location.search).get('pedido');
+  if (returned && orderReference.test(returned)) {
+    receiptStorage(returned);
+    return returned;
+  }
+  return receiptStorage();
 }
 
 function mask(value: string, template: string) {
@@ -46,21 +55,15 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
 }) {
   const shop = product ?? defaultProduct;
   const [buyer, setBuyer] = useState(emptyBuyer);
-  const [number, setNumber] = useState('');
-  const [holder, setHolder] = useState('');
-  const [expiry, setExpiry] = useState('');
-  const [cvv, setCvv] = useState('');
   const [installments, setInstallments] = useState(1);
   const [lookup, setLookup] = useState({ busy: false, message: '' });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [receipt, setReceipt] = useState<Receipt | null>(null);
-  const [lastId, setLastId] = useState(() => receiptStorage());
+  const [lastId, setLastId] = useState(currentReceipt);
   const addressRequest = useRef(0);
   const inFlight = useRef(false);
   const chargeStarted = useRef(false);
-  const uniqueBrand = cardType(digits(number));
-  const brand = digits(number).length >= 4 && uniqueBrand.length === 1 ? uniqueBrand[0] : null;
   const count = shop.amount ? Math.min(shop.maxInstallments, shop.amount) : 1;
   const incomplete = ['processing','communication_error','pending','review','authorized','created'].includes(receipt?.status ?? '');
   const saved = Boolean(lastId);
@@ -97,10 +100,13 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
     }
   }
 
-  function clearCard() { setNumber(''); setHolder(''); setExpiry(''); setCvv(''); }
-
   function newPurchase() {
     receiptStorage('');
+    const url = new URL(window.location.href);
+    if (url.searchParams.has('pedido')) {
+      url.searchParams.delete('pedido');
+      window.history.replaceState(null, '', url);
+    }
     setLastId('');
     setReceipt(null);
     setError('');
@@ -109,49 +115,25 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
 
   async function pay(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!shop.ready || !shop.publicKey || shop.gatewayVersion === undefined || saved || inFlight.current || chargeStarted.current) return;
+    if (!shop.ready || shop.gatewayVersion === undefined || saved || inFlight.current || chargeStarted.current) return;
     setError('');
-    const cardNumber = digits(number);
-    const month = Number(expiry.slice(0,2));
-    const year = 2000 + Number(expiry.slice(3,5));
-    const now = new Date();
     if (buyer.name.trim().split(/\s+/).length < 2) { setError('Informe o nome completo.'); return; }
     if (!validCpf(buyer.cpf)) { setError('Informe um CPF válido.'); return; }
     if (!/^[1-9][0-9]9\d{8}$/.test(digits(buyer.phone))) { setError('Informe um celular com DDD.'); return; }
     if (digits(buyer.cep).length !== 8) { setError('Informe um CEP com 8 dígitos.'); return; }
-    if (!luhn(cardNumber) || (brand && !brand.lengths.includes(cardNumber.length))) {
-      setError('Confira o número do cartão.'); return;
-    }
-    if (!/^[\p{L} .'-]{2,64}$/u.test(holder.trim())) { setError('Confira o nome impresso no cartão.'); return; }
-    if (expiry.length !== 5 || month < 1 || month > 12 || new Date(year, month, 1) <= now) {
-      setError('Confira a data de validade do cartão.'); return;
-    }
-    if (brand ? cvv.length !== brand.code.size : !/^\d{3,4}$/.test(cvv)) {
-      setError('Confira o código de segurança.'); return;
-    }
     inFlight.current = true;
     setBusy(true);
     let id = '';
     try {
-      const tokenResponse = await fetch('https://api.pagar.me/core/v5/tokens?appId=' + encodeURIComponent(shop.publicKey), {
-        method: 'POST', credentials: 'omit', redirect: 'error', signal: AbortSignal.timeout(8000),
-        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-          type: 'card', card: { number: cardNumber, holder_name: holder.trim(), exp_month: month, exp_year: year, cvv }
-        })
-      }).catch(() => { throw new ApiError(503, 'Falha ao conectar com a tokenização Pagar.me.'); });
-      const token = await tokenResponse.json().catch(() => null);
-      if (!tokenResponse.ok || typeof token?.id !== 'string' || !/^token_[A-Za-z0-9]{4,100}$/.test(token.id)) {
-        throw new ApiError(422, 'A Pagar.me não conseguiu tokenizar o cartão. Confira os dados e tente novamente.');
-      }
-      clearCard();
       id = crypto.randomUUID();
       receiptStorage(id);
       setLastId(id);
       chargeStarted.current = true;
       const result = await api<Receipt>('/orders', { method: 'POST', body: {
-        id, version: shop.version, gatewayVersion: shop.gatewayVersion, installments, buyer, token: token.id
+        id, version: shop.version, gatewayVersion: shop.gatewayVersion, installments, buyer
       } });
       setReceipt(result);
+      if (result.checkoutUrl) window.location.assign(result.checkoutUrl);
     } catch (failure) {
       if (id && failure instanceof ApiError && failure.safeToRetry) {
         newPurchase();
@@ -177,7 +159,7 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
     <main className="container">
       <div className="gateway-banner panel">
         <SectionHeading icon={Settings} title="Configurações de pagamento" subtitle="Gerenciamento do gateway Pagar.me / Stone" />
-        <button className="button primary connect" type="button" onClick={() => { clearCard(); onAdmin(); }}>
+        <button className="button primary connect" type="button" onClick={onAdmin}>
           <LockKeyhole size={21} aria-hidden="true" /><span>CONECTAR CHAVE SK<small>PAGAR.ME / STONE</small></span>
         </button>
       </div>
@@ -186,9 +168,9 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
           <section className="panel form-panel">
             <SectionHeading icon={UserRound} title="Dados do comprador" subtitle="Informe seus dados para emissão do pedido." />
             <div className="fields two">
-              <Field label="Nome completo" icon={UserRound} required autoComplete="name" maxLength={128} placeholder="Seu nome completo" {...field('name', value => value.toLocaleUpperCase('pt-BR'))} />
+              <Field label="Nome completo" icon={UserRound} required autoComplete="name" maxLength={64} placeholder="Seu nome completo" {...field('name', value => value.toLocaleUpperCase('pt-BR'))} />
               <Field label="CPF" icon={Barcode} required inputMode="numeric" placeholder="000.000.000-00" {...field('cpf', value => mask(digits(value), '###.###.###-##'))} />
-              <Field label="E-mail" icon={Mail} required type="email" autoComplete="email" maxLength={150} placeholder="nome@exemplo.com" {...field('email')} />
+              <Field label="E-mail" icon={Mail} required type="email" autoComplete="email" maxLength={64} placeholder="nome@exemplo.com" {...field('email')} />
               <Field label="Celular com DDD" icon={Phone} required inputMode="tel" autoComplete="tel-national" placeholder="(00) 00000-0000" {...field('phone', value => mask(digits(value), '(##) #####-####'))} />
             </div>
           </section>
@@ -225,32 +207,10 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
               <SectionHeading icon={CreditCard} title="Pagamento" subtitle="Cartão de crédito" />
               <div className="brands" aria-label="Bandeiras sujeitas à habilitação da conta"><span className="visa">VISA</span><span className="mastercard" aria-label="Mastercard" /><span className="elo">elo</span><span className="amex">AMEX</span><span className="hiper">Hipercard</span></div>
             </div>
-            <div className="payment-flow">
-              <div className="fields">
-                <Field label="Número do cartão" icon={CreditCard} required disabled={busy || saved} inputMode="numeric" autoComplete="off" placeholder="0000 0000 0000 0000"
-                  value={number} onChange={e => {
-                    const value = digits(e.target.value).slice(0,19);
-                    const types = cardType(value);
-                    const gaps = types.length === 1 ? types[0].gaps : [4,8,12,16];
-                    setNumber([...value].map((char, idx) => (gaps.includes(idx) ? ' ' : '') + char).join(''));
-                  }} />
-                {brand && <span className="detected-brand" aria-live="polite">Bandeira identificada: {brand.niceType}</span>}
-                <Field label="Nome impresso no cartão" icon={UserRound} required disabled={busy || saved} autoComplete="off" placeholder="NOME IMPRESSO NO CARTÃO" maxLength={64} value={holder} onChange={e => setHolder(e.target.value.toLocaleUpperCase('pt-BR'))} />
-                <div className="fields two">
-                  <Field label="Validade (MM/AA)" required disabled={busy || saved} inputMode="numeric" autoComplete="off" placeholder="MM/AA" value={expiry} onChange={e => setExpiry(mask(digits(e.target.value),'##/##'))} />
-                  <Field label="CVV" icon={LockKeyhole} required disabled={busy || saved} type="password" inputMode="numeric" autoComplete="off" placeholder="•••" value={cvv} onChange={e => setCvv(digits(e.target.value).slice(0,4))} />
-                </div>
-                <label className="field">Parcelamento <select aria-label="Parcelamento" disabled={busy || saved || !shop.amount} value={Math.min(installments, count)} onChange={e => setInstallments(Number(e.target.value))}>
-                  {shop.amount ? Array.from({ length: count }, (_, index) => <option key={index} value={index + 1}>{installmentsLabel(shop.amount!, index + 1)}</option>) : <option value={1}>Aguardando valor da venda</option>}
-                </select></label>
-              </div>
-              <div className="card-graphic" aria-label={'Bandeira: ' + (brand?.niceType ?? 'a identificar')}>
-                <span className="chip" aria-hidden="true" /><WalletCards size={25} aria-hidden="true" />
-                <div className="card-digits" aria-hidden="true">•••• &nbsp; •••• &nbsp; •••• &nbsp; ••••</div>
-                <small>{brand?.niceType ?? 'Cartão de crédito'}</small>
-              </div>
-            </div>
-            <div className="payment-note"><LockKeyhole size={23} /><span><strong>Pagamento processado pela Pagar.me</strong><small>Os dados do cartão são enviados diretamente à Pagar.me.</small></span><b className="pagarme">pagar.me</b></div>
+            <label className="field">Parcelamento <select aria-label="Parcelamento" disabled={busy || saved || !shop.amount} value={Math.min(installments, count)} onChange={e => setInstallments(Number(e.target.value))}>
+              {shop.amount ? Array.from({ length: count }, (_, index) => <option key={index} value={index + 1}>{installmentsLabel(shop.amount!, index + 1)}</option>) : <option value={1}>Aguardando valor da venda</option>}
+            </select></label>
+            <div className="payment-note"><LockKeyhole size={23} /><span><strong>Pagamento no checkout oficial da Pagar.me</strong><small>Ao finalizar, você será encaminhado na mesma aba para preencher os dados do cartão.</small></span><b className="pagarme">pagar.me</b></div>
             {shop.environment === 'test' && shop.ready && <p className="notice info">Ambiente de teste. Use somente os cartões de teste oficiais da Pagar.me.</p>}
             {(loadError || (product && !shop.ready)) && <p className="notice" role="status">{loadError || 'O checkout está aguardando a liberação do lojista.'}</p>}
             {error && <p className="notice error" role="alert">{error}</p>}
@@ -260,7 +220,8 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
               {receipt?.status === 'declined' && <span>A transação foi recusada. Confira os dados do cartão ou consulte o emissor.{receipt.refusalCode ? ' Código: ' + receipt.refusalCode + '.' : ''}</span>}
               {receipt?.status === 'request_failed' && <span>A solicitação não foi processada. Confira os dados ou contate o lojista.</span>}
               {incomplete && <span>Acompanhe a confirmação usando a referência do pedido.</span>}
-              {receipt && ['declined','request_failed','paid','captured','canceled','refunded'].includes(receipt.status) && <button type="button" className="button secondary" onClick={newPurchase}>Nova compra</button>}
+              {receipt?.checkoutUrl && <a className="button primary" href={receipt.checkoutUrl}>CONTINUAR NA PAGAR.ME</a>}
+              {receipt && ['declined','request_failed','paid','captured','canceled','expired','refunded'].includes(receipt.status) && <button type="button" className="button secondary" onClick={newPurchase}>Nova compra</button>}
             </div>}
             <button className="button primary purchase" type="submit" disabled={busy || saved || !shop.ready}>
               {busy ? <Loader /> : <LockKeyhole size={20} />} {busy ? 'PROCESSANDO' : 'FINALIZAR PAGAMENTO'}

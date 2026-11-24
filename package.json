@@ -17,7 +17,6 @@
     "verify:services": "node --env-file-if-exists=.env.local scripts/verify-services.mjs"
   },
   "dependencies": {
-    "credit-card-type": "^10.2.0",
     "express": "^5.1.0",
     "helmet": "^8.1.0",
     "lucide-react": "^0.577.0",

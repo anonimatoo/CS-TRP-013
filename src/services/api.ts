@@ -12,7 +12,6 @@ export interface Product {
   environment: Environment;
   operation: 'auth_and_capture' | 'auth_only';
   version: number;
-  publicKey?: string;
   min?: number;
   max?: number;
 }
@@ -26,15 +25,12 @@ export interface Receipt {
   http: number | null;
   refusalCode: string | null;
   providerStatus: string | null;
+  checkoutUrl: string | null;
 }
 
 export interface Gateway {
   environment: Environment;
-  account: string | null;
-  mode: 'gateway' | 'psp' | null;
-  publicKey: string | null;
   hasKey: boolean;
-  checkoutConfigured: boolean;
   enabled: boolean;
   connected: boolean | null;
   testedAt: string | null;
@@ -47,7 +43,7 @@ export const statusLabels: Record<string, string> = {
   created: 'Pedido criado', processing: 'Pagamento iniciado', authorized: 'Pagamento autorizado',
   captured: 'Pagamento capturado', paid: 'Pagamento aprovado', declined: 'Pagamento recusado',
   pending: 'Pagamento pendente', review: 'Pagamento em análise', canceled: 'Pagamento cancelado',
-  refunded: 'Pagamento estornado', chargedback: 'Contestação registrada',
+  expired: 'Prazo do checkout encerrado', refunded: 'Pagamento estornado', chargedback: 'Contestação registrada',
   communication_error: 'Confirmação pendente', request_failed: 'Solicitação rejeitada'
 };
 export const statusLabel = (status: string) => statusLabels[status] ?? 'Status em atualização';

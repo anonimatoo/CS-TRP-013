@@ -2,18 +2,17 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { digits, validCpf, states } from '../shared/validation.mjs';
 import { audit, one } from './db.mjs';
-import { checkoutConfigured, gatewayRow, gatewaySecret } from './gateway.mjs';
-import { ProviderError, providerId, readPayment } from './pagarme.mjs';
+import { gatewayRow, gatewaySecret } from './gateway.mjs';
+import { hostedCheckoutName, hostedCheckoutUrl, ProviderError, providerId, readPayment } from './pagarme.mjs';
 import { HttpError } from './security.mjs';
 
 const required = (max) => z.string().trim().min(1).max(max).refine(value => !/[\u0000-\u001f\u007f]/.test(value));
 export const payment = z.object({
   id: z.uuid(), version: z.number().int().positive(), gatewayVersion: z.number().int().nonnegative(), installments: z.number().int().min(1).max(24),
-  token: z.string().regex(/^token_[A-Za-z0-9]{4,100}$/),
   buyer: z.object({
-    name: required(128).refine(name => name.split(/\s+/).length >= 2).transform(name => name.toLocaleUpperCase('pt-BR')),
+    name: required(64).refine(name => name.split(/\s+/).length >= 2).transform(name => name.toLocaleUpperCase('pt-BR')),
     cpf: z.string().max(14).refine(validCpf).transform(digits),
-    email: z.email().max(150), phone: z.string().max(18).transform(digits).refine(phone => /^[1-9][0-9]9\d{8}$/.test(phone)),
+    email: z.email().max(64), phone: z.string().max(18).transform(digits).refine(phone => /^[1-9][0-9]9\d{8}$/.test(phone)),
     cep: z.string().max(9).transform(digits).refine(cep => /^\d{8}$/.test(cep)),
     street: required(130), number: required(20), complement: z.string().trim().max(128),
     neighborhood: required(100), city: required(64), state: z.enum(states), country: z.literal('BR')
@@ -23,9 +22,14 @@ export const payment = z.object({
 export const productRow = (db, lock = false) =>
   one(db, 'SELECT * FROM cs_trp_013_v2.product WHERE id=1' + (lock ? ' FOR UPDATE' : ''));
 
+const checkoutMinutes = 30;
+const activeHostedStatuses = ['processing','pending','communication_error','review','authorized'];
+
 export const publicOrder = row => ({
   id: row.id, status: row.status, amount: row.amount, installments: row.installments, environment: row.environment,
-  http: row.http_status, refusalCode: row.refusal_code, providerStatus: row.provider_status
+  http: row.http_status, refusalCode: row.refusal_code, providerStatus: row.provider_status,
+  checkoutUrl: row.status === 'pending' && !row.provider_order && Date.parse(row.checkout_expires_at) > Date.now()
+    ? hostedCheckoutUrl(row.checkout_url) : null
 });
 
 function billingDetails(buyer) {
@@ -35,11 +39,8 @@ function billingDetails(buyer) {
     zip_code: buyer.cep, city: buyer.city, state: buyer.state, country: buyer.country
   };
   return {
-    address,
-    customer: {
-      name: buyer.name, email: buyer.email, document: buyer.cpf, document_type: 'CPF', type: 'individual', address,
-      phones: { mobile_phone: { country_code: '55', area_code: buyer.phone.slice(0, 2), number: buyer.phone.slice(2) } }
-    }
+    name: buyer.name, email: buyer.email, document: buyer.cpf, document_type: 'CPF', type: 'individual', address,
+    phones: { mobile_phone: { country_code: '55', area_code: buyer.phone.slice(0, 2), number: buyer.phone.slice(2) } }
   };
 }
 
@@ -83,7 +84,7 @@ export function makePayments(db, config, pagarme) {
       if (previous) return { row: previous };
       const product = await productRow(client, true);
       const gateway = await gatewayRow(client, product.environment, true);
-      if (!product.enabled || !product.amount || !gateway.enabled || !gateway.last_ok || !gateway.secret || !checkoutConfigured(gateway) ||
+      if (!product.enabled || !product.amount || !gateway.enabled || !gateway.last_ok || !gateway.secret ||
           (gateway.environment === 'live' && !config.allowLive)) {
         throw new HttpError(503, 'Pagamento indisponível no momento.', { safeToRetry: true });
       }
@@ -94,86 +95,128 @@ export function makePayments(db, config, pagarme) {
         throw new HttpError(422, 'O parcelamento selecionado não está disponível.', { safeToRetry: true });
       }
       const row = await one(client, `INSERT INTO cs_trp_013_v2.orders
-        (id,environment,account,price_version,amount,installments,product_name,status)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,'processing') ON CONFLICT DO NOTHING RETURNING *`,
+        (id,environment,account,price_version,amount,installments,product_name,status,hosted_checkout)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,'processing',true) ON CONFLICT DO NOTHING RETURNING *`,
       [input.id, gateway.environment, gateway.account, product.version, product.amount, input.installments, product.name]);
       return row ? { row, product, gateway } : { row: await get(input.id, client) };
     });
+  }
+
+  async function storeCheckout(row, data, http) {
+    const id = providerId(data?.id, 'pl');
+    const url = hostedCheckoutUrl(data?.url);
+    const total = data?.cart_settings?.total_cost;
+    if (!id || !url || data.name !== hostedCheckoutName(row.id) || (total != null && total !== row.amount)) {
+      throw new ProviderError(null);
+    }
+    const created = Date.parse(data.created_at);
+    const expires = new Date((Number.isFinite(created) ? created : Date.parse(row.created_at)) + checkoutMinutes * 60000);
+    return await one(db, `UPDATE cs_trp_013_v2.orders SET
+      checkout_provider_id=$2,checkout_url=$3,checkout_expires_at=$4,
+      status=CASE WHEN provider_order IS NULL THEN 'pending' ELSE status END,
+      http_status=CASE WHEN provider_order IS NULL THEN $5 ELSE http_status END,updated_at=now()
+      WHERE id=$1 AND checkout_provider_id IS NULL RETURNING *`,
+    [row.id, id, url, expires, http]) ?? await get(row.id);
   }
 
   async function submit(input) {
     const { row, product, gateway } = await reserve(input);
     if (!gateway) return row;
     const key = gatewaySecret(config, gateway);
-    const { address, customer } = billingDetails(input.buyer);
-    const creditCard = { installments: row.installments, operation_type: product.operation };
-    let buyer = { customer };
-    let sentOrder = false;
-
+    const returnUrl = new URL(config.origin);
+    returnUrl.searchParams.set('pedido', row.id);
     try {
-      if (gateway.mode === 'psp') {
-        const created = await pagarme(key, '/customers', { method: 'POST', body: customer });
-        const customerId = providerId(created.data?.id, 'cus');
-        if (!customerId) throw new ProviderError(null);
-        const card = await pagarme(key, '/customers/' + customerId + '/cards', {
-          method: 'POST', body: { token: input.token, billing_address: address }
-        });
-        creditCard.card_id = providerId(card.data?.id, 'card');
-        if (!creditCard.card_id) throw new ProviderError(null);
-        buyer = { customer_id: customerId };
-      } else {
-        creditCard.card_token = input.token;
-        creditCard.card = { billing_address: address };
-      }
-      sentOrder = true;
-      const result = await pagarme(key, '/orders', { method: 'POST', idempotency: row.id, body: {
-        code: row.id, closed: true, ...buyer,
-        items: [{ amount: row.amount, description: row.product_name, quantity: 1, code: 'PC-GAMER' }],
-        payments: [{ payment_method: 'credit_card', credit_card: creditCard }]
+      const result = await pagarme(key, '/paymentlinks', { method: 'POST', idempotency: row.id, body: {
+        type: 'order', name: hostedCheckoutName(row.id), order_code: row.id,
+        max_sessions: 1, max_paid_sessions: 1, expires_in: checkoutMinutes,
+        cart_settings: { items: [{ name: row.product_name, amount: row.amount, default_quantity: 1 }] },
+        customer_settings: { customer: billingDetails(input.buyer) },
+        payment_settings: {
+          accepted_payment_methods: ['credit_card'],
+          credit_card_settings: {
+            operation_type: product.operation,
+            installments: [{ number: row.installments, total: row.amount }]
+          }
+        },
+        ...(returnUrl.protocol === 'https:' ? { flow_settings: { success_url: returnUrl.href } } : {})
       } });
-      const providerOrder = providerId(result.data?.id, 'or');
-      const charge = result.data?.charges?.[0];
-      if (!providerOrder || result.data?.code !== row.id || result.data?.amount !== row.amount ||
-          (charge && charge.amount !== row.amount)) throw new ProviderError(null);
-      return await db.tx(client => apply(client, row.id, providerOrder, readPayment(charge, result.data.status), result.http));
+      return await storeCheckout(row, result.data, result.http);
     } catch (error) {
       if (!(error instanceof ProviderError)) throw error;
-      const confirmedFailure = !sentOrder || [400,401,403,422].includes(error.http);
-      const status = confirmedFailure ? 'request_failed' : 'communication_error';
+      const status = [400,401,403,422].includes(error.http) ? 'request_failed' : 'communication_error';
       return await one(db, `UPDATE cs_trp_013_v2.orders SET status=$2,http_status=$3,updated_at=now()
-        WHERE id=$1 AND provider_order IS NULL RETURNING *`, [row.id, status, error.http]) ?? await get(row.id);
+        WHERE id=$1 AND provider_order IS NULL AND checkout_provider_id IS NULL RETURNING *`,
+      [row.id, status, error.http]) ?? await get(row.id);
     }
   }
 
   async function keyFor(row) {
     const gateway = await gatewayRow(db, row.environment);
-    if (!gateway.secret || gateway.account !== row.account) {
+    if (!gateway.secret || (row.account && gateway.account !== row.account)) {
       throw new HttpError(409, 'Reconecte uma credencial da conta associada ao pedido.');
     }
     return gatewaySecret(config, gateway);
   }
 
   async function findProviderOrder(key, row) {
-    if (row.provider_order) return pagarme(key, '/orders/' + row.provider_order);
-    const result = await pagarme(key, '/orders?size=2&code=' + row.id);
+    const options = { hosted: row.hosted_checkout };
+    if (row.provider_order) return pagarme(key, '/orders/' + row.provider_order, options);
+    const result = await pagarme(key, '/orders?size=2&code=' + row.id, options);
     const matches = result.data?.data?.filter(order => order.code === row.id) ?? [];
     if (matches.length > 1) throw new HttpError(409, 'A Pagar.me retornou mais de um pedido para esta referência.');
     return { http: result.http, data: matches[0] };
   }
 
+  async function refreshHostedCheckout(key, row) {
+    if (!row.checkout_provider_id) {
+      const name = hostedCheckoutName(row.id);
+      const result = await pagarme(key, '/paymentlinks?name=' + encodeURIComponent(name));
+      const entries = Array.isArray(result.data) ? result.data : result.data?.data;
+      const matches = Array.isArray(entries) ? entries.filter(link => link.name === name) : [];
+      if (matches.length > 1) throw new HttpError(409, 'A Pagar.me retornou mais de um checkout para esta referência.');
+      return matches[0] ? storeCheckout(row, matches[0], result.http) : row;
+    }
+    if (Date.parse(row.checkout_expires_at) > Date.now()) return row;
+    const result = await pagarme(key, '/paymentlinks/' + row.checkout_provider_id);
+    if (result.data?.id !== row.checkout_provider_id || result.data?.name !== hostedCheckoutName(row.id)) {
+      throw new HttpError(409, 'O checkout retornado diverge da referência local.');
+    }
+    if (result.data.total_sessions !== 0 || !['expired','canceled','cancelled'].includes(result.data.status)) return row;
+    const status = result.data.status === 'expired' ? 'expired' : 'canceled';
+    return await one(db, `UPDATE cs_trp_013_v2.orders SET status=$2,http_status=$3,updated_at=now()
+      WHERE id=$1 AND provider_order IS NULL AND status IN ('pending','communication_error') RETURNING *`,
+    [row.id, status, result.http]) ?? await get(row.id);
+  }
+
+  async function status(row) {
+    if (!row.hosted_checkout || !activeHostedStatuses.includes(row.status)) return row;
+    if (row.status === 'processing' && Date.now() - Date.parse(row.created_at) < 15000) return row;
+    const claimed = await one(db, `UPDATE cs_trp_013_v2.orders SET checkout_synced_at=now()
+      WHERE id=$1 AND (checkout_synced_at IS NULL OR checkout_synced_at < now()-interval '15 seconds')
+      RETURNING *`, [row.id]);
+    if (!claimed) return row;
+    try {
+      return await refresh(claimed);
+    } catch (error) {
+      if (error instanceof ProviderError || error instanceof HttpError) return claimed;
+      throw error;
+    }
+  }
+
   async function refresh(row) {
     const key = await keyFor(row);
     if (row.provider_charge) {
-      const response = await pagarme(key, '/charges/' + row.provider_charge);
+      const response = await pagarme(key, '/charges/' + row.provider_charge, { hosted: row.hosted_checkout });
       if (response.data?.amount !== row.amount || response.data?.id !== row.provider_charge) {
         throw new HttpError(409, 'A cobrança retornada diverge do pedido.');
       }
       return db.tx(client => apply(client, row.id, row.provider_order, readPayment(response.data), response.http));
     }
     const result = await findProviderOrder(key, row);
-    if (!result.data) return row;
+    if (!result.data) return row.hosted_checkout ? refreshHostedCheckout(key, row) : row;
     const id = providerId(result.data.id, 'or');
-    if (!id || result.data.code !== row.id || result.data.amount !== row.amount) throw new HttpError(409, 'O pedido retornado diverge da referência local.');
+    if (!id || result.data.code !== row.id || result.data.amount !== row.amount ||
+        (result.data.charges?.[0] && result.data.charges[0].amount !== row.amount)) throw new HttpError(409, 'O pedido retornado diverge da referência local.');
     return db.tx(client => apply(client, row.id, id, readPayment(result.data.charges?.[0], result.data.status), result.http));
   }
 
@@ -194,8 +237,8 @@ export function makePayments(db, config, pagarme) {
     });
     const path = '/charges/' + row.provider_charge;
     const result = action === 'capture'
-      ? await pagarme(key, path + '/capture', { method: 'POST', idempotency: operation, body: { amount: row.amount } })
-      : await pagarme(key, path, { method: 'DELETE', idempotency: operation });
+      ? await pagarme(key, path + '/capture', { method: 'POST', idempotency: operation, body: { amount: row.amount }, hosted: row.hosted_checkout })
+      : await pagarme(key, path, { method: 'DELETE', idempotency: operation, hosted: row.hosted_checkout });
     if (result.data?.id !== row.provider_charge || result.data?.amount !== row.amount) throw new ProviderError(null);
     const snapshot = readPayment(result.data);
     return db.tx(client => apply(client, row.id, row.provider_order, snapshot, result.http));
@@ -212,13 +255,14 @@ export function makePayments(db, config, pagarme) {
     if (!remoteId) return;
     let row = await one(db, `SELECT * FROM cs_trp_013_v2.orders WHERE ${isOrder ? 'provider_order' : 'provider_charge'}=$1`, [remoteId]);
     if (!row && lookup.success) row = await get(lookup.data);
-    if (!row || row.account !== event.account?.id) return;
+    const account = providerId(event.account?.id, 'acc');
+    if (!row || !account || (row.account && row.account !== account)) return;
     if (await one(db, 'SELECT id FROM cs_trp_013_v2.webhook_events WHERE id=$1', [eventId])) return;
     const key = await keyFor(row);
-    const auth = await pagarme(key, '/hooks/' + eventId);
+    const auth = await pagarme(key, '/hooks/' + eventId, { hosted: row.hosted_checkout });
     const verified = auth.data;
     if (verified?.id !== eventId || (verified.type ?? verified.event) !== kind ||
-        verified.account?.id !== row.account || verified.data?.id !== remoteId) {
+        verified.account?.id !== account || verified.data?.id !== remoteId) {
       throw new HttpError(403, 'Evento não confirmado pela Pagar.me.');
     }
     const result = await refresh(row);
@@ -229,5 +273,5 @@ export function makePayments(db, config, pagarme) {
       ON CONFLICT DO NOTHING`, [eventId, kind, row.id]);
   }
 
-  return { submit, get, refresh, operate, hook };
+  return { submit, get, status, refresh, operate, hook };
 }

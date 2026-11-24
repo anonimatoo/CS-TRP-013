@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { randomUUID, randomBytes } from 'node:crypto';
 import test from 'node:test';
-import { digits, luhn, parseBrl, validCpf } from '../shared/validation.mjs';
+import { digits, parseBrl, validCpf } from '../shared/validation.mjs';
 import { decrypt, encrypt } from '../server/security.mjs';
-import { account, firstKey, fixture, hookSecret, liveKey, password, publicKey, secondKey, wrongKey } from './fixture.mjs';
+import { account, firstKey, fixture, hookSecret, liveKey, password, secondKey, wrongKey } from './fixture.mjs';
 
-test('CPF, moeda brasileira, centavos exatos e Luhn', () => {
+test('CPF, moeda brasileira e centavos exatos', () => {
   assert.equal(validCpf('529.982.247-25'), true);
   assert.equal(validCpf('111.111.111-11'), false);
   assert.equal(validCpf('529.982.247-26'), false);
@@ -15,8 +15,6 @@ test('CPF, moeda brasileira, centavos exatos e Luhn', () => {
   assert.equal(parseBrl('30.50'), null);
   assert.equal(parseBrl('-10,00'), null);
   assert.equal(parseBrl('1e6'), null);
-  assert.equal(luhn('4000000000000010'), true);
-  assert.equal(luhn('4000000000000011'), false);
 });
 
 test('AES-256-GCM com IV aleatório, autenticação e vínculo com conta/ambiente', () => {
@@ -47,8 +45,8 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
   const post = (path, body = {}, extra) => req(path, { method: 'POST', body, ...extra });
   const keyAction = (action, body) => post('/admin/gateway/test/' + action, body);
   let gatewayVersion;
-  const input = (version, token = 'token_ApprovedTest') => ({
-    id: randomUUID(), version, gatewayVersion, token, installments: 3,
+  const input = version => ({
+    id: randomUUID(), version, gatewayVersion, installments: 3,
     buyer: { name: 'Comprador Teste', cpf: '52998224725', email: 'teste@example.com', phone: '11900000000',
       cep: '01001000', street: 'Praça da Sé', number: '1', complement: '', neighborhood: 'Sé', city: 'São Paulo', state: 'SP', country: 'BR' }
   });
@@ -98,20 +96,14 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
     assert.equal((await keyAction('add', { secret: wrongKey })).json.http, 401);
     const savedKey = (await keyAction('add', { secret: firstKey })).json;
     assert.equal(savedKey.hasKey, true);
-    assert.equal(savedKey.checkoutConfigured, false);
-    assert.equal(savedKey.publicKey, null);
-    assert.equal(savedKey.account, null);
-    assert.equal((await keyAction('activate', { confirmed: true })).status, 409);
+    assert.equal('publicKey' in savedKey, false);
+    assert.equal('account' in savedKey, false);
+    assert.equal(savedKey.enabled, false);
     assert.equal((await req('/checkout')).json.ready, false);
     const raw = await app.db.query('SELECT secret FROM cs_trp_013_v2.gateway WHERE environment=$1', ['test']);
     assert.notEqual(raw.rows[0].secret, firstKey);
     assert.equal((await keyAction('test')).json.http, 200);
-    assert.equal(app.remote.chargePosts, 0);
-    const separate = { publicKey, account, mode: 'gateway' };
-    const wrongPublicKey = await keyAction('configure', { ...separate, publicKey: 'pk_wrong_environment' });
-    assert.equal(wrongPublicKey.status, 422);
-    assert.match(wrongPublicKey.json.message, /PK.*Sandbox/);
-    assert.equal((await keyAction('configure', separate)).json.checkoutConfigured, true);
+    assert.equal(app.remote.linkPosts, 0);
     assert.equal((await keyAction('activate', { confirmed: false })).status, 422);
     assert.equal((await keyAction('activate', { confirmed: true })).json.enabled, true);
     assert.equal((await updateProduct({ ...product, price: '1.50' })).status, 422);
@@ -133,15 +125,28 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
     const [a,b] = await Promise.all([post('/orders', good), post('/orders', good)]);
     assert.equal(a.status, 200);
     assert.equal(b.status, 200);
+    assert.equal(app.remote.linkPosts, 1);
+    const initiated = [a.json,b.json].find(order => order.checkoutUrl);
+    assert.equal(initiated.status, 'pending');
+    assert.match(initiated.checkoutUrl, /^https:\/\/payment-link\.pagar\.me\//);
+    const sent = app.remote.calls.find(call => call.method === 'POST' && call.route === '/paymentlinks');
+    assert.equal(sent.hostname, 'sdx-api.pagar.me');
+    assert.equal(sent.idempotency, good.id);
+    assert.equal(sent.body.order_code, good.id);
+    assert.equal(sent.body.max_sessions, 1);
+    assert.equal(sent.body.max_paid_sessions, 1);
+    assert.deepEqual(sent.body.cart_settings.items, [{ amount: 299999, name: 'PC Gamer', default_quantity: 1 }]);
+    assert.deepEqual(sent.body.payment_settings.credit_card_settings.installments, [{ number: 3, total: 299999 }]);
+    assert.equal(sent.body.customer_settings.customer.document, good.buyer.cpf);
+    app.remote.complete(good.id);
     paid = (await req('/orders/' + good.id)).json;
     assert.equal(paid.status, 'paid');
     assert.equal(paid.amount, 299999);
-    assert.equal(app.remote.chargePosts, 1);
-    const sent = app.remote.calls.find(call => call.method === 'POST' && call.route === '/orders');
-    assert.equal(sent.idempotency, good.id);
-    assert.equal(sent.body.items[0].amount, 299999);
-    assert.deepEqual(Object.keys(sent.body.payments[0].credit_card.card), ['billing_address']);
-    declined = (await post('/orders', input(version, 'token_DeclinedTest'))).json;
+    assert.equal(paid.checkoutUrl, null);
+    const request = input(version);
+    assert.equal((await post('/orders', request)).json.status, 'pending');
+    app.remote.complete(request.id, 'failed');
+    declined = (await req('/orders/' + request.id)).json;
     assert.equal(declined.status, 'declined');
     assert.equal(declined.refusalCode, '0051');
     assert.ok(!('refusalReason' in declined));
@@ -149,12 +154,16 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
   });
 
   await t.test('conciliação de falha ambígua, webhook autenticado e deduplicado', async () => {
-    const uncertain = input(version, 'token_UncertainTest');
+    const uncertain = input(version);
+    app.remote.nextLinkFault = 'timeout';
     assert.equal((await post('/orders', uncertain)).json.status, 'communication_error');
-    const before = app.remote.chargePosts;
+    const before = app.remote.linkPosts;
     assert.equal((await post('/orders', uncertain)).json.status, 'communication_error');
-    assert.equal(app.remote.chargePosts, before);
-    const reference = [...app.remote.orders.values()].find(order => order.code === uncertain.id);
+    assert.equal(app.remote.linkPosts, before);
+    const resumed = (await req('/orders/' + uncertain.id)).json;
+    assert.equal(resumed.status, 'pending');
+    assert.ok(resumed.checkoutUrl);
+    const reference = app.remote.complete(uncertain.id);
     const event = { id: 'hook_DemoHook001', account: { id: account }, type: 'order.paid', data: { id: reference.id, code: reference.code } };
     assert.equal((await post('/hooks/pagarme/invalido', event)).status, 404);
     assert.equal((await post('/hooks/pagarme/' + hookSecret, event)).status, 502);
@@ -174,17 +183,17 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
     assert.equal((await app.db.query('SELECT secret FROM cs_trp_013_v2.gateway WHERE environment=$1', ['test'])).rows[0].secret, before);
     const rotated = await keyAction('replace', { secret: secondKey });
     assert.equal(rotated.status, 200);
-    assert.equal(rotated.json.publicKey, publicKey);
-    assert.equal(rotated.json.account, account);
-    assert.equal(rotated.json.mode, 'gateway');
     assert.equal(rotated.json.enabled, true);
     assert.equal((await post('/orders', input(version))).json.safeToRetry, true);
     gatewayVersion = (await req('/checkout')).json.gatewayVersion;
     const saved = await updateProduct({ ...product, operation: 'auth_only' });
     version = saved.json.version;
     const manual = (await post('/orders', input(version))).json;
-    assert.equal(manual.status, 'authorized');
+    assert.equal(manual.status, 'pending');
     assert.equal(app.remote.calls.at(-1).key, secondKey);
+    assert.equal(app.remote.calls.at(-1).body.payment_settings.credit_card_settings.operation_type, 'auth_only');
+    app.remote.complete(manual.id, 'pending');
+    assert.equal((await req('/orders/' + manual.id)).json.status, 'authorized');
     assert.equal((await post('/admin/orders/' + manual.id + '/capture', { confirmed: true })).json.status, 'paid');
     assert.equal((await post('/admin/orders/' + manual.id + '/cancel', { confirmed: true })).json.status, 'refunded');
     assert.equal((await req('/admin/summary/test')).json.declined, 1);
@@ -193,12 +202,12 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
 
   await t.test('desativação, consulta histórica, desconexão, sessão encerrada e limite de login', async () => {
     assert.equal((await keyAction('disable')).json.enabled, false);
-    assert.equal((await req('/checkout')).json.publicKey, null);
+    assert.equal((await req('/checkout')).json.ready, false);
     assert.equal((await post('/orders', input(version))).status, 503);
     assert.equal((await post('/admin/orders/' + paid.id + '/refresh')).json.status, 'paid');
     assert.equal((await keyAction('disconnect')).status, 422);
     assert.equal((await keyAction('disconnect', { confirmed: true })).json.hasKey, false);
-    assert.equal((await req('/admin/orders/' + paid.id)).json.row.account, account);
+    assert.equal((await req('/admin/orders/' + paid.id)).json.row.status, 'paid');
     assert.equal((await post('/admin/logout')).status, 200);
     assert.equal((await req('/admin/session')).status, 401);
     for (let index = 0; index < 6; index++) assert.equal((await post('/admin/login', { password: 'errada' })).status, 401);
@@ -206,13 +215,14 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
   });
 });
 
-test('PSP usa o token para criar cartão e envia apenas card_id no pedido', async t => {
-  const app = await fixture();
+test('checkout hospedado retorna ao domínio configurado e rejeita URL externa desconhecida', async t => {
+  const origin = 'https://checkout.example';
+  const app = await fixture({ originOverride: origin });
   t.after(app.close);
   let cookie;
   let csrf;
   async function request(path, body, method = 'POST') {
-    const headers = { Origin: app.origin, 'Content-Type': 'application/json' };
+    const headers = { Origin: origin, 'Content-Type': 'application/json' };
     if (cookie) headers.Cookie = cookie;
     if (csrf) headers['X-CSRF-Token'] = csrf;
     const response = await fetch(app.origin + '/api' + path, { method, headers, body: body && JSON.stringify(body) });
@@ -222,28 +232,27 @@ test('PSP usa o token para criar cartão e envia apenas card_id no pedido', asyn
     return json;
   }
   csrf = (await request('/admin/login', { password })).csrf;
-  app.remote.hooks.set('hook_PspAccount', { account: { id: account } });
-  const staged = await request('/admin/gateway/test/add', { secret: firstKey });
-  assert.equal(staged.account, account);
-  assert.equal(staged.checkoutConfigured, false);
-  await request('/admin/gateway/test/configure', { publicKey, account, mode: 'psp' });
+  await request('/admin/gateway/test/add', { secret: firstKey });
   await request('/admin/gateway/test/activate', { confirmed: true });
   await request('/admin/product', {
     name: 'PC Gamer', description: 'Computador gamer personalizado.', image: '/images/pc-gamer.webp',
     price: '10,10', maxInstallments: 1, enabled: true, operation: 'auth_and_capture', environment: 'test'
   }, 'PUT');
   const checkout = await request('/checkout', undefined, 'GET');
-  const result = await request('/orders', {
-    id: randomUUID(), version: checkout.version, gatewayVersion: checkout.gatewayVersion, token: 'token_PspLocalDemo', installments: 1,
+  const order = {
+    id: randomUUID(), version: checkout.version, gatewayVersion: checkout.gatewayVersion, installments: 1,
     buyer: { name: 'Comprador Teste', cpf: '52998224725', email: 'teste@example.com', phone: '11900000000',
       cep: '01001000', street: 'Praça da Sé', number: '1', complement: '', neighborhood: 'Sé', city: 'São Paulo', state: 'SP', country: 'BR' }
-  });
-  assert.equal(result.status, 'paid');
-  const typed = app.remote.calls.filter(call => call.method === 'POST');
-  assert.deepEqual(typed.map(call => call.route), ['/customers','/customers/cus_DemoCustomer/cards','/orders']);
-  assert.equal(typed[1].body.token, 'token_PspLocalDemo');
-  assert.equal(typed[2].body.customer_id, 'cus_DemoCustomer');
-  assert.deepEqual(typed[2].body.payments[0].credit_card, { card_id: 'card_DemoCard', installments: 1, operation_type: 'auth_and_capture' });
+  };
+  const result = await request('/orders', order);
+  assert.equal(result.status, 'pending');
+  const sent = app.remote.calls.filter(call => call.method === 'POST');
+  assert.deepEqual(sent.map(call => call.route), ['/paymentlinks']);
+  assert.equal(sent[0].body.flow_settings.success_url, origin + '/?pedido=' + order.id);
   const persisted = JSON.stringify((await app.db.query('SELECT * FROM cs_trp_013_v2.orders')).rows);
-  assert.ok(!persisted.includes('card_DemoCard') && !persisted.includes('token_PspLocalDemo') && !persisted.includes('52998224725'));
+  assert.ok(!persisted.includes('52998224725') && !persisted.includes('teste@example.com'));
+  app.remote.nextLinkFault = 'invalid_url';
+  const malicious = await request('/orders', { ...order, id: randomUUID() });
+  assert.equal(malicious.checkoutUrl, null);
+  assert.equal(malicious.status, 'communication_error');
 });

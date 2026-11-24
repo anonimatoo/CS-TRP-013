@@ -19,18 +19,9 @@ export function parseBrl(value) {
   return Number.isSafeInteger(amount) ? amount : null;
 }
 
-export function luhn(value) {
-  const numbers = digits(value);
-  if (numbers.length < 12 || numbers.length > 19 || /^(\d)\1+$/.test(numbers)) return false;
-  return [...numbers].reverse().reduce((sum, char, index) => {
-    const number = Number(char) * (index % 2 === 0 ? 1 : 2);
-    return sum + (number > 9 ? number - 9 : number);
-  }, 0) % 10 === 0;
-}
-
-export function pagarmeKeyEnvironment(value, kind) {
+export function pagarmeKeyEnvironment(value) {
   const key = String(value ?? '').trim();
-  const prefix = kind + '_';
+  const prefix = 'sk_';
   if (!key.startsWith(prefix)) return null;
   if (!/^(?:test_)?[A-Za-z0-9_-]{8,128}$/.test(key.slice(prefix.length))) return null;
   return key.startsWith(prefix + 'test_') ? 'test' : 'live';

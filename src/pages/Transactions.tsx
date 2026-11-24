@@ -3,8 +3,8 @@ import { api, brl, dateTime, explain, statusLabel, type Environment } from '../s
 import { Loader } from '../components/UI';
 
 interface Row {
-  id: string; account: string; status: string; amount: number; installments: number; created_at: string;
-  provider_order: string | null; provider_charge: string | null; provider_status: string | null;
+  id: string; account: string | null; status: string; amount: number; installments: number; created_at: string;
+  provider_order: string | null; checkout_provider_id: string | null; provider_charge: string | null; provider_status: string | null;
   refusal_code: string | null; refusal_reason: string | null; http_status: number | null;
 }
 type Event = { id: number; provider_id: string | null; status: string; created_at: string };
@@ -51,7 +51,7 @@ export function Transactions({ env, csrf }: { env: Environment; csrf: string }) 
       <thead><tr><th>Pedido</th><th>Data</th><th>Valor</th><th>Status</th><th>Provedor</th></tr></thead>
       <tbody>{result.rows.map(row => <tr key={row.id}>
         <td><button type="button" className="text-button" onClick={() => void open(row.id)}>{row.id.slice(0,8)}</button></td>
-        <td>{dateTime(row.created_at)}</td><td>{brl(row.amount)}</td><td>{statusLabel(row.status)}</td><td>{row.provider_order ?? '—'}</td>
+        <td>{dateTime(row.created_at)}</td><td>{brl(row.amount)}</td><td>{statusLabel(row.status)}</td><td>{row.provider_order ?? row.checkout_provider_id ?? '—'}</td>
       </tr>)}</tbody>
     </table></div>}
     {(page > 1 || result?.hasNext) && <div className="dialog-actions">
@@ -62,7 +62,8 @@ export function Transactions({ env, csrf }: { env: Environment; csrf: string }) 
       <div className="transaction-header"><h3>Detalhes do pedido</h3><button className="text-button" onClick={() => setDetails(undefined)}>Fechar detalhes</button></div>
       <dl className="gateway-facts">
         <div><dt>Pedido local</dt><dd>{details.row.id}</dd></div>
-        <div><dt>Conta comercial</dt><dd>{details.row.account}</dd></div>
+        <div><dt>Conta comercial</dt><dd>{details.row.account ?? '—'}</dd></div>
+        <div><dt>Checkout Pagar.me</dt><dd>{details.row.checkout_provider_id ?? '—'}</dd></div>
         <div><dt>Cobrança Pagar.me</dt><dd>{details.row.provider_charge ?? '—'}</dd></div>
         <div><dt>Status do provedor</dt><dd>{details.row.provider_status ?? '—'}</dd></div>
         <div><dt>Resposta HTTP</dt><dd>{details.row.http_status ?? '—'}</dd></div>

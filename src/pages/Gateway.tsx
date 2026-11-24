@@ -4,7 +4,7 @@ import { pagarmeKeyEnvironment } from '../../shared/validation.mjs';
 import { Field, Loader } from '../components/UI';
 import { ApiError, api, dateTime, envLabel, explain, type Environment, type Gateway as GatewayState } from '../services/api';
 
-type Action = 'add' | 'replace' | 'configure' | 'test' | 'activate' | 'disable' | 'disconnect';
+type Action = 'add' | 'replace' | 'test' | 'activate' | 'disable' | 'disconnect';
 type Pending = 'activate' | 'disconnect';
 
 interface Props {
@@ -19,16 +19,13 @@ export function Gateway({ csrf, env, onEnvironmentChange, onChange, onExpired }:
   const [configuration, setConfiguration] = useState<GatewayState>();
   const [retry, setRetry] = useState(0);
   const [key, setKey] = useState('');
-  const [publicKey, setPublicKey] = useState('');
-  const [account, setAccount] = useState('');
-  const [mode, setMode] = useState<'gateway' | 'psp'>('gateway');
   const [busy, setBusy] = useState<Action | 'loading' | ''>('loading');
   const [pending, setPending] = useState<Pending | ''>('');
   const [confirmed, setConfirmed] = useState(false);
   const [feedback, setFeedback] = useState({ error: false, text: '' });
   const path = '/admin/gateway/' + env;
   const gateway = configuration?.environment === env ? configuration : undefined;
-  const detected = pagarmeKeyEnvironment(key, 'sk');
+  const detected = pagarmeKeyEnvironment(key);
   const changing = busy !== '' && busy !== 'loading';
 
   useEffect(() => {
@@ -38,7 +35,7 @@ export function Gateway({ csrf, env, onEnvironmentChange, onChange, onExpired }:
     setPending('');
     setConfirmed(false);
     api<GatewayState>(path).then(result => {
-      if (current) apply(result);
+      if (current) setConfiguration(result);
     }).catch(error => {
       if (!current) return;
       setConfiguration(undefined);
@@ -52,15 +49,8 @@ export function Gateway({ csrf, env, onEnvironmentChange, onChange, onExpired }:
 
   function editKey(value: string) {
     setKey(value);
-    const detectedEnvironment = pagarmeKeyEnvironment(value, 'sk');
+    const detectedEnvironment = pagarmeKeyEnvironment(value);
     if (detectedEnvironment && detectedEnvironment !== env) onEnvironmentChange(detectedEnvironment);
-  }
-
-  function apply(result: GatewayState) {
-    setConfiguration(result);
-    setPublicKey(result.publicKey ?? '');
-    setAccount(result.account ?? '');
-    setMode(result.mode ?? 'gateway');
   }
 
   async function act(action: Action) {
@@ -72,18 +62,16 @@ export function Gateway({ csrf, env, onEnvironmentChange, onChange, onExpired }:
     }
     setBusy(action);
     setFeedback({ error: false, text: '' });
-    const body = keyAction ? { secret: key }
-      : action === 'configure' ? { publicKey, account, mode } : { confirmed };
+    const body = keyAction ? { secret: key } : { confirmed };
     if (keyAction) setKey('');
     try {
       const result = await api<GatewayState>(path + '/' + action, { method: 'POST', csrf, body });
-      apply(result);
+      setConfiguration(result);
       onChange();
       setPending('');
       setConfirmed(false);
       const messages: Record<Action, string> = {
-        add: result.checkoutConfigured ? 'Secret Key cadastrada e validada.' : 'Secret Key cadastrada e validada. Configure a tokenização para receber pagamentos.',
-        configure: 'Configuração de tokenização salva.',
+        add: 'Secret Key cadastrada e validada.',
         replace: 'Chave substituída. Revogue a chave anterior no painel oficial da Pagar.me.',
         test: result.message ?? '',
         activate: 'Gateway ativado.',
@@ -98,10 +86,10 @@ export function Gateway({ csrf, env, onEnvironmentChange, onChange, onExpired }:
     } finally { setBusy(''); }
   }
 
-  const inCheck = busy === 'loading' || busy === 'test' || busy === 'add' || busy === 'replace' || busy === 'configure';
+  const inCheck = busy === 'loading' || busy === 'test' || busy === 'add' || busy === 'replace';
   const tone = inCheck ? 'blue' : !gateway?.hasKey ? 'gray' : gateway.connected === false ? 'red' : gateway.enabled ? 'green' : 'yellow';
   const flag = inCheck ? 'Conexão em verificação' : !gateway?.hasKey ? 'Chave não cadastrada' : gateway.connected === false
-    ? ([401,403].includes(gateway.http ?? 0) ? 'Autenticação recusada' : 'Falha no teste') : gateway.enabled ? 'Conectado e ativado' : gateway.checkoutConfigured ? 'Gateway desativado' : 'Secret Key cadastrada';
+    ? ([401,403].includes(gateway.http ?? 0) ? 'Autenticação recusada' : 'Falha no teste') : gateway.enabled ? 'Conectado e ativado' : 'Gateway desativado';
 
   return <>
     <label className="field env-field">Ambiente
@@ -120,7 +108,7 @@ export function Gateway({ csrf, env, onEnvironmentChange, onChange, onExpired }:
       <dl className="gateway-facts">
         <div><dt>Chave cadastrada</dt><dd>{gateway.hasKey ? 'Sim' : 'Não'}</dd></div>
         <div><dt>Conexão com a Pagar.me</dt><dd>{gateway.connected === null ? 'A testar' : gateway.connected ? 'Leitura validada' : 'Falha no teste'}</dd></div>
-        <div><dt>Processamento</dt><dd>{gateway.enabled ? 'Ativado' : gateway.checkoutConfigured ? 'Desativado' : 'Aguardando tokenização'}</dd></div>
+        <div><dt>Processamento</dt><dd>{gateway.enabled ? 'Ativado' : 'Desativado'}</dd></div>
         <div><dt>Última atualização</dt><dd>{dateTime(gateway.updatedAt)}</dd></div>
         <div><dt>Último teste</dt><dd>{dateTime(gateway.testedAt)}</dd></div>
         <div><dt>HTTP do provedor</dt><dd>{gateway.http ?? '—'}</dd></div>
@@ -137,27 +125,14 @@ export function Gateway({ csrf, env, onEnvironmentChange, onChange, onExpired }:
         <button className="button primary" type={gateway.hasKey ? 'button' : 'submit'} disabled={!!busy || gateway.hasKey}><KeyRound size={17} /> ADICIONAR CHAVE</button>
         <button className="button dark" type="button" disabled={!!busy || !gateway.hasKey} onClick={() => void act('test')}><Activity size={17} /> TESTAR CONEXÃO</button>
         <button className="button secondary" type={gateway.hasKey ? 'submit' : 'button'} disabled={!!busy || !gateway.hasKey}><RefreshCw size={17} /> SUBSTITUIR CHAVE SK</button>
-        <button className="button secondary" type="button" disabled={!!busy || !gateway.connected || !gateway.checkoutConfigured || gateway.enabled} onClick={() => { setPending('activate'); setConfirmed(false); }}><Power size={17} /> ATIVAR GATEWAY</button>
+        <button className="button secondary" type="button" disabled={!!busy || !gateway.connected || gateway.enabled} onClick={() => { setPending('activate'); setConfirmed(false); }}><Power size={17} /> ATIVAR GATEWAY</button>
         <button className="button secondary" type="button" disabled={!!busy || !gateway.enabled} onClick={() => void act('disable')}><Power size={17} /> DESATIVAR GATEWAY</button>
         <button className="button danger" type="button" disabled={!!busy || !gateway.hasKey} onClick={() => { setPending('disconnect'); setConfirmed(false); }}><Unlink size={17} /> DESCONECTAR CHAVE</button>
       </div>}
     </form>
-    {gateway?.hasKey && <details className="gateway-checkout-settings">
-      <summary>Configuração da tokenização</summary>
-      <p className="help">O checkout de cartão usa a chave pública da Pagar.me. Esta configuração é feita separadamente e pode ser reaproveitada ao trocar a SK.</p>
-      <form onSubmit={event => { event.preventDefault(); void act('configure'); }}>
-        <div className="fields two admin-fields">
-          <Field label="Chave pública para tokenização" required autoComplete="off" placeholder={env === 'test' ? 'pk_test_…' : 'pk_…'}
-            value={publicKey} onChange={e => setPublicKey(e.target.value)} maxLength={140} spellCheck={false} />
-          <Field label="Identificador da conta Pagar.me" required placeholder="acc_…" value={account} onChange={e => setAccount(e.target.value)} maxLength={104} spellCheck={false} />
-          <label className="field">Modalidade da conta<select value={mode} onChange={e => setMode(e.target.value as 'gateway' | 'psp')}><option value="gateway">Gateway</option><option value="psp">PSP</option></select></label>
-        </div>
-        <button className="button secondary" type="submit" disabled={!!busy}>SALVAR TOKENIZAÇÃO</button>
-      </form>
-    </details>}
     {gateway && pending && <div className="confirmation">
       <label><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} /> {pending === 'activate'
-        ? 'Confirmei as permissões de escrita e que a chave pública pertence à conta no painel da Pagar.me.'
+        ? 'Confirmei que a Secret Key pode criar links de pagamento na Pagar.me.'
         : 'Confirmo a remoção da chave deste sistema. Revogarei a chave no painel oficial da Pagar.me.'}</label>
       <div><button className="button secondary" type="button" onClick={() => setPending('')}>Voltar</button>
         <button className={'button ' + (pending === 'disconnect' ? 'danger' : 'primary')} disabled={!confirmed || !!busy} type="button" onClick={() => void act(pending)}>{busy && <Loader />} Confirmar</button></div>

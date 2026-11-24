@@ -1,4 +1,19 @@
 export const API = 'https://api.pagar.me/core/v5';
+const SANDBOX_PAYMENT_LINK_API = 'https://sdx-api.pagar.me/core/v5';
+const checkoutHosts = new Set(['checkout.pagar.me', 'payment-link.pagar.me']);
+
+export function hostedCheckoutUrl(value) {
+  if (typeof value !== 'string' || value.length > 2048) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && checkoutHosts.has(url.hostname) &&
+      !url.username && !url.password && !url.port ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+export const hostedCheckoutName = id => 'CS TRP 013 ' + id;
 
 function sanitized(value, max = 220) {
   if (typeof value !== 'string') return null;
@@ -20,14 +35,17 @@ export class ProviderError extends Error {
 }
 
 export function makePagarme(fetcher = fetch) {
-  return async function pagarme(key, path, { method = 'GET', body, idempotency } = {}) {
+  return async function pagarme(key, path, { method = 'GET', body, idempotency, hosted = false } = {}) {
     let response;
     try {
-      response = await fetcher(API + path, {
+      const paymentLink = /^\/paymentlinks(?:[/?]|$)/.test(path);
+      const base = (paymentLink || hosted) && key.startsWith('sk_test_') ? SANDBOX_PAYMENT_LINK_API : API;
+      response = await fetcher(base + path, {
         method, redirect: 'error', signal: AbortSignal.timeout(4500),
         headers: {
           Authorization: 'Basic ' + Buffer.from(key + ':').toString('base64'),
           Accept: 'application/json',
+          ...(paymentLink ? { 'User-Agent': 'CS-TRP-013/1.0' } : {}),
           ...(body ? { 'Content-Type': 'application/json' } : {}),
           ...(idempotency ? { 'Idempotency-Key': idempotency } : {})
         },
