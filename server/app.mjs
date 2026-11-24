@@ -2,7 +2,7 @@ import express from 'express';
 import helmet from 'helmet';
 import { z } from 'zod';
 import { audit, one } from './db.mjs';
-import { environment, gatewayRow, makeGateway } from './gateway.mjs';
+import { checkoutConfigured, environment, gatewayRow, makeGateway } from './gateway.mjs';
 import { makePagarme, ProviderError } from './pagarme.mjs';
 import { makePayments, payment, productRow, publicOrder } from './payments.mjs';
 import { equalSecret, HttpError, makeSecurity } from './security.mjs';
@@ -59,7 +59,7 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
   app.get('/api/checkout', async (_req, res) => {
     const product = await productRow(db);
     const current = await gatewayRow(db, product.environment);
-    const ready = Boolean(product.enabled && product.amount && current.enabled && current.last_ok && current.secret &&
+    const ready = Boolean(product.enabled && product.amount && current.enabled && current.last_ok && current.secret && checkoutConfigured(current) &&
       (current.environment !== 'live' || config.allowLive));
     res.json({ ...safeShop(product), ready, gatewayVersion: current.version, publicKey: ready ? current.public_key : null });
   });
@@ -113,8 +113,8 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
   });
   app.post('/api/admin/gateway/:env/:action', security.limit('gateway', 25, 60), async (req, res) => {
     const env = parse(environment, req.params.env, 'Ambiente inválido.');
-    const action = parse(z.enum(['add','replace','test','activate','disable','disconnect']), req.params.action, 'Ação inválida.');
-    if (action === 'add' || action === 'replace') return res.json(await gateway.save(env, action, req.body));
+    const action = parse(z.enum(['add','replace','configure','test','activate','disable','disconnect']), req.params.action, 'Ação inválida.');
+    if (['add','replace','configure'].includes(action)) return res.json(await gateway.save(env, action, req.body));
     if (action === 'test') return res.json(await gateway.test(env));
     res.json(await gateway.change(env, action, req.body));
   });

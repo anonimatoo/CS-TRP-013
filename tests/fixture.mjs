@@ -72,6 +72,7 @@ export async function fixture({ browser = false, port = 0, originOverride } = {}
       return output(order, 201);
     }
     if (route.startsWith('/orders/')) return remote.orders.has(route.slice(8)) ? output(remote.orders.get(route.slice(8))) : output({},404);
+    if (route === '/hooks') return output({ data: [...remote.hooks.values()] });
     if (route.startsWith('/hooks/')) return remote.hooks.has(route.slice(7)) ? output(remote.hooks.get(route.slice(7))) : output({},404);
     if (route.startsWith('/charges/')) {
       const [id, action] = route.slice(9).split('/');

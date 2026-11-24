@@ -165,6 +165,9 @@ svg { flex-shrink: 0; vertical-align: middle; }
 .gateway-facts dt, .dashboard span { color: var(--muted); font-size: .77rem; font-weight: 650; }
 .gateway-facts dd { margin: 2px 0 0; overflow-wrap: anywhere; font-size: .86rem; font-weight: 760; }
 .admin-fields { margin: 14px 0; }
+.gateway-checkout-settings { margin-top: 18px; }
+.gateway-checkout-settings summary { color: #344665; cursor: pointer; font-weight: 700; }
+.gateway-checkout-settings .help { margin-top: 8px; }
 .gateway-actions { display: flex; flex-wrap: wrap; gap: 7px; }
 .gateway-actions .button { flex: 1 1 30%; }
 .notice { padding: 9px 11px; margin: 8px 0; border-radius: 8px; border: 1px solid #d9dfe8; background: #edf1f7; color: #334665; font-size: .85rem; line-height: 1.36; }

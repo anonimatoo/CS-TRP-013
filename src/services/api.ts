@@ -34,6 +34,7 @@ export interface Gateway {
   mode: 'gateway' | 'psp' | null;
   publicKey: string | null;
   hasKey: boolean;
+  checkoutConfigured: boolean;
   enabled: boolean;
   connected: boolean | null;
   testedAt: string | null;

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { digits, validCpf, states } from '../shared/validation.mjs';
 import { audit, one } from './db.mjs';
-import { gatewayRow, gatewaySecret } from './gateway.mjs';
+import { checkoutConfigured, gatewayRow, gatewaySecret } from './gateway.mjs';
 import { ProviderError, providerId, readPayment } from './pagarme.mjs';
 import { HttpError } from './security.mjs';
 
@@ -83,7 +83,7 @@ export function makePayments(db, config, pagarme) {
       if (previous) return { row: previous };
       const product = await productRow(client, true);
       const gateway = await gatewayRow(client, product.environment, true);
-      if (!product.enabled || !product.amount || !gateway.enabled || !gateway.last_ok || !gateway.secret ||
+      if (!product.enabled || !product.amount || !gateway.enabled || !gateway.last_ok || !gateway.secret || !checkoutConfigured(gateway) ||
           (gateway.environment === 'live' && !config.allowLive)) {
         throw new HttpError(503, 'Pagamento indisponível no momento.', { safeToRetry: true });
       }

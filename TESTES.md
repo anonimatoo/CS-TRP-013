@@ -6,8 +6,8 @@ Execução em 24/11/2026 com Node.js 24 em Linux. A documentação de instalaç�
 | --- | --- |
 | `npm run check` | Sintaxe JavaScript e checagem TypeScript aprovadas. |
 | `npm run build` | Build de produção do Vite concluída. |
-| `npm test` | 12 testes aprovados. Validações, criptografia, sessões, limite de login, CSRF, persistência local, migrações repetíveis e preservação de tabela preexistente, ViaCEP, ciclo de credenciais, preços, concorrência, PSP, conciliação, captura, estorno, confirmação de webhook e encaminhamento no adaptador da Vercel. |
-| `npm run test:browser` | Chromium aprovado em 1448, 768, 390 e 320 px. Verificou a abertura e a responsividade do modal, senha correta/incorreta, opção de exibir senha, todas as ações de credencial, continuidade do formulário, ViaCEP, tokenização interceptada e persistência da referência do pedido após recarregar. |
+| `npm test` | 12 testes aprovados. Validações, criptografia, sessões, limite de login, CSRF, persistência local, migrações repetíveis e preservação de tabela preexistente, ViaCEP, ciclo de credenciais, cadastro e troca com apenas a SK, bloqueio de ativação sem tokenização, preços, concorrência, PSP, conciliação, captura, estorno, confirmação de webhook e encaminhamento no adaptador da Vercel. |
+| `npm run test:browser` | Chromium aprovado em 1448, 768, 390 e 320 px. Verificou a abertura e a responsividade do modal, senha correta/incorreta, opção de exibir senha, cadastro e troca da SK sem solicitar PK, configuração separada da tokenização, continuidade do formulário, ViaCEP, tokenização interceptada e persistência da referência do pedido após recarregar. |
 | Neon real | PostgreSQL 18 via WSS com certificado TLS verificado. Migração aplicada duas vezes no schema `cs_trp_013_v2`, com 11 tabelas e preservação das 21 tabelas preexistentes. Checkout HTTP 200, acesso administrativo anônimo HTTP 401 e sessão compartilhada entre duas instâncias Express com pools distintos, seguida de logout confirmado. |
 | ViaCEP real | Consulta ao CEP 01001-000 retornou HTTP 200 e São Paulo/SP. |
 | `npm audit` e `npm audit --omit=dev` | Zero vulnerabilidades reportadas pelo registro npm na execução. |

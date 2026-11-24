@@ -46,7 +46,6 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
   }
   const post = (path, body = {}, extra) => req(path, { method: 'POST', body, ...extra });
   const keyAction = (action, body) => post('/admin/gateway/test/' + action, body);
-  const cfg = secret => ({ secret, publicKey, account, mode: 'gateway' });
   let gatewayVersion;
   const input = (version, token = 'token_ApprovedTest') => ({
     id: randomUUID(), version, gatewayVersion, token, installments: 3,
@@ -59,7 +58,7 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
 
   await t.test('autenticação, antiforça bruta e CSRF', async () => {
     assert.equal((await req('/admin/gateway/test')).status, 401);
-    assert.equal((await post('/admin/gateway/test/add', cfg(firstKey))).status, 401);
+    assert.equal((await post('/admin/gateway/test/add', { secret: firstKey })).status, 401);
     assert.equal((await post('/admin/login', { password: 'errada' })).status, 401);
     assert.equal((await post('/admin/login', { password }, { from: 'https://origem.example' })).status, 403);
     const valid = await post('/admin/login', { password });
@@ -69,7 +68,7 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
     assert.match(issued, /SameSite=Strict/i);
     cookie = issued.split(';')[0];
     csrf = valid.json.csrf;
-    assert.equal((await post('/admin/gateway/test/add', cfg(firstKey), { token: false })).status, 403);
+    assert.equal((await post('/admin/gateway/test/add', { secret: firstKey }, { token: false })).status, 403);
     assert.equal((await req('/admin/session')).json.csrf, csrf);
   });
 
@@ -84,12 +83,22 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
   await t.test('cadastro, autenticação do gateway, configuração comercial e ativação', async () => {
     assert.equal((await req('/checkout')).json.amount, null);
     assert.equal((await keyAction('activate', { confirmed: true })).status, 409);
-    assert.equal((await keyAction('add', cfg('sk_invalid'))).status, 422);
-    assert.equal((await keyAction('add', cfg(wrongKey))).json.http, 401);
-    assert.equal((await keyAction('add', cfg(firstKey))).json.hasKey, true);
+    assert.equal((await keyAction('add', { secret: 'sk_invalid' })).status, 422);
+    assert.equal((await keyAction('add', { secret: wrongKey })).json.http, 401);
+    const savedKey = (await keyAction('add', { secret: firstKey })).json;
+    assert.equal(savedKey.hasKey, true);
+    assert.equal(savedKey.checkoutConfigured, false);
+    assert.equal(savedKey.publicKey, null);
+    assert.equal(savedKey.account, null);
+    assert.equal((await keyAction('activate', { confirmed: true })).status, 409);
+    assert.equal((await req('/checkout')).json.ready, false);
     const raw = await app.db.query('SELECT secret FROM cs_trp_013_v2.gateway WHERE environment=$1', ['test']);
     assert.notEqual(raw.rows[0].secret, firstKey);
     assert.equal((await keyAction('test')).json.http, 200);
+    assert.equal(app.remote.chargePosts, 0);
+    const separate = { publicKey, account, mode: 'gateway' };
+    assert.equal((await keyAction('configure', { ...separate, publicKey: 'pk_wrong_environment' })).status, 422);
+    assert.equal((await keyAction('configure', separate)).json.checkoutConfigured, true);
     assert.equal((await keyAction('activate', { confirmed: false })).status, 422);
     assert.equal((await keyAction('activate', { confirmed: true })).json.enabled, true);
     assert.equal((await updateProduct({ ...product, price: '1.50' })).status, 422);
@@ -148,9 +157,14 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
 
   await t.test('substituição com rollback, chave nova em operação, captura e estorno', async () => {
     const before = (await app.db.query('SELECT secret FROM cs_trp_013_v2.gateway WHERE environment=$1', ['test'])).rows[0].secret;
-    assert.equal((await keyAction('replace', cfg(wrongKey))).status, 422);
+    assert.equal((await keyAction('replace', { secret: wrongKey })).status, 422);
     assert.equal((await app.db.query('SELECT secret FROM cs_trp_013_v2.gateway WHERE environment=$1', ['test'])).rows[0].secret, before);
-    assert.equal((await keyAction('replace', cfg(secondKey))).status, 200);
+    const rotated = await keyAction('replace', { secret: secondKey });
+    assert.equal(rotated.status, 200);
+    assert.equal(rotated.json.publicKey, publicKey);
+    assert.equal(rotated.json.account, account);
+    assert.equal(rotated.json.mode, 'gateway');
+    assert.equal(rotated.json.enabled, true);
     assert.equal((await post('/orders', input(version))).json.safeToRetry, true);
     gatewayVersion = (await req('/checkout')).json.gatewayVersion;
     const saved = await updateProduct({ ...product, operation: 'auth_only' });
@@ -195,7 +209,11 @@ test('PSP usa o token para criar cartão e envia apenas card_id no pedido', asyn
     return json;
   }
   csrf = (await request('/admin/login', { password })).csrf;
-  await request('/admin/gateway/test/add', { secret: firstKey, publicKey, account, mode: 'psp' });
+  app.remote.hooks.set('hook_PspAccount', { account: { id: account } });
+  const staged = await request('/admin/gateway/test/add', { secret: firstKey });
+  assert.equal(staged.account, account);
+  assert.equal(staged.checkoutConfigured, false);
+  await request('/admin/gateway/test/configure', { publicKey, account, mode: 'psp' });
   await request('/admin/gateway/test/activate', { confirmed: true });
   await request('/admin/product', {
     name: 'PC Gamer', description: 'Computador gamer personalizado.', image: '/images/pc-gamer.webp',
