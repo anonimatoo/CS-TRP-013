@@ -167,6 +167,30 @@ test('Diagnóstico, recuperação e limites de reenvio do checkout hospedado', a
     assert.equal(details.row.reconciliation_state, 'pending');
   });
 
+  await t.test('Recupera o link Stone do pedido com HTTP 201 e URL rejeitada', async () => {
+    const form = input();
+    app.remote.respondToCreation = ({ link, persist }) => {
+      link.url = 'https://payment-link.stone.com.br/' + link.id;
+      persist();
+      return Response.json({ ...link, url: 'https://payment-link.stone.com.br.example/' + link.id }, { status: 201 });
+    };
+    const unresolved = await submit(form);
+    assert.equal(unresolved.status, 'communication_error');
+    assert.equal(unresolved.http, 201);
+    assert.equal(unresolved.checkoutError, 'checkout_url_invalid');
+    assert.equal(unresolved.checkoutUrl, null);
+
+    const before = app.remote.linkPosts;
+    const { data: recovered } = await request('/orders/' + form.id);
+    assert.equal(recovered.id, form.id);
+    assert.equal(recovered.status, 'pending');
+    assert.equal(new URL(recovered.checkoutUrl).hostname, 'payment-link.stone.com.br');
+    const { data: details } = await request('/admin/orders/' + form.id);
+    assert.equal(details.row.checkout_http, 201);
+    assert.equal(details.row.has_checkout_url, true);
+    assert.equal(app.remote.linkPosts, before);
+  });
+
   await t.test('Recupera o checkout existente e conserva o erro original da criação', async () => {
     app.remote.nextLinkFault = 'timeout';
     const form = input();

@@ -38,7 +38,7 @@ export async function fixture({ browser = false, port = 0, originOverride, allow
   const remote = {
     calls: [], orders: new Map(), links: new Map(), hooks: new Map(), linkPosts: 0, sequence: 0, failing: false,
     nextLinkFault: '', respondToCreation: null, linkCodes: new Map(),
-    orderLookup: null, checkoutLookup: null,
+    orderLookup: null, checkoutLookup: null, checkoutHost: 'payment-link.pagar.me',
     complete(code, status = 'paid') {
       const link = [...this.links.values()].find(value => this.linkCodes.get(value.id) === code);
       if (!link || link.total_sessions !== 0) throw new Error('Checkout não está disponível para simular um pedido.');
@@ -79,10 +79,11 @@ export async function fixture({ browser = false, port = 0, originOverride, allow
       remote.linkPosts++;
       const id = 'pl_DemoCheckout' + ++remote.sequence;
       const amount = body.cart_settings.items[0].amount;
+      const checkoutHost = key === liveKey ? 'payment-link.stone.com.br' : remote.checkoutHost;
       // Based on checkout-response and criar-link. The response example omits order_code.
       const link = {
         id, name: body.name, type: body.type,
-        url: fault === 'invalid_url' ? 'https://payment-link.pagar.me.evil.example/' + id : 'https://payment-link.pagar.me/' + id,
+        url: fault === 'invalid_url' ? 'https://payment-link.pagar.me.evil.example/' + id : 'https://' + checkoutHost + '/' + id,
         status: 'active', total_sessions: 0, total_paid_sessions: 0,
         max_sessions: body.max_sessions, max_paid_sessions: body.max_paid_sessions,
         created_at: new Date().toISOString().replace(/(\.\d+)Z$/, '$10000Z'),

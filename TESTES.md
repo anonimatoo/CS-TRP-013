@@ -7,14 +7,16 @@ Execução de 24/11/2026. A integração de teste usa Express, PostgreSQL via PG
 | `npm ci` | 177 pacotes instalados. npm 11 sinalizou o script de instalação do esbuild. As compilações concluíram. |
 | `npm run check` | Sintaxe JavaScript e checagem TypeScript aprovadas. |
 | `npm run build` | Build do Vite concluída. |
-| `npm test` | 59 testes aprovados em Linux com Node.js 24.22.3. |
-| `node --test` | Os mesmos 59 testes passaram em Linux com Node.js 22.23.5. O npm usa a descoberta de testes do próprio Node. |
+| `npm test` | 61 testes aprovados em Linux com Node.js 24.22.3. |
+| `node --test` | Os mesmos 61 testes passaram em Linux com Node.js 22.23.5. O npm usa a descoberta de testes do próprio Node. |
 | `npm run test:browser` | Chromium aprovado. Cobriu cadastro e troca de SK, detecção de ambiente, ativação, recuperação do checkout, navegação na mesma aba, retorno à loja, aprovação, recusa, expiração da sessão administrativa e layout em 1448, 768, 390 e 320 px. |
 | `npm audit` e `npm audit --omit=dev` | Zero vulnerabilidades reportadas pelo registro npm. |
 | Instalação PowerShell | PowerShell 7.4.21 com Node.js 22.23.5 em Linux. Geração dos três segredos, preservação de `.env.local` e cópia do modelo conferidas. |
 | `vercel build` | Build local no destino Preview. O artefato tem frontend estático, rewrite de API e função Express com runtime `nodejs24.x` e limite de 30 s. A CLI selecionou Node 24 com base em `engines`. |
 
 ## Regressões verificadas
+
+O relato seguinte mostrou HTTP 201 e `checkout_url_invalid`. Os hosts `payment-link.pagar.me` e `payment-link.stone.com.br` serviram o mesmo HTML de checkout por HTTPS. Os novos testes confirmam o aceite do endereço Stone, a rejeição de domínios semelhantes, a recuperação do pedido existente sem um segundo POST e a abertura na mesma aba no Chromium com provedor simulado. [Checkout Stone](https://payment-link.stone.com.br/)
 
 - Criação com HTTP 200 e 201, URL nos domínios oficiais, resposta reduzida enriquecida por consulta ao ID e validade retornada pelo provedor.
 - Preservação do HTTP em respostas com corpo inválido ou incompleto, com categorias distintas para ID, URL, referência, preço, parcelas e data.

@@ -1,6 +1,10 @@
 export const API = 'https://api.pagar.me/core/v5';
 const SANDBOX_PAYMENT_LINK_API = 'https://sdx-api.pagar.me/core/v5';
-const checkoutHosts = new Set(['checkout.pagar.me', 'payment-link.pagar.me']);
+const checkoutHosts = new Set([
+  'checkout.pagar.me',
+  'payment-link.pagar.me',
+  'payment-link.stone.com.br'
+]);
 
 export function hostedCheckoutUrl(value) {
   if (typeof value !== 'string' || value.length > 2048) return null;

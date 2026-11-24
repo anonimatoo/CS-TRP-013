@@ -254,6 +254,8 @@ test('checkout em produção exige ativação e retorna ao domínio configurado'
   };
   const result = await request('/orders', order);
   assert.equal(result.status, 'pending');
+  assert.equal(result.http, 201);
+  assert.equal(new URL(result.checkoutUrl).hostname, 'payment-link.stone.com.br');
   const sent = app.remote.calls.filter(call => call.method === 'POST');
   assert.deepEqual(sent.map(call => call.route), ['/paymentlinks']);
   assert.equal(sent[0].hostname, 'api.pagar.me');

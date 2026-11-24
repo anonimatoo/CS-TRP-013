@@ -89,7 +89,9 @@ try {
   await fillBuyer();
 
   assert.equal(await page.getByLabel('Número do cartão').count(), 0);
-  await page.route('https://payment-link.pagar.me/**', async route => {
+  const stoneCheckout = 'https://payment-link.stone.com.br/**';
+  app.remote.checkoutHost = 'payment-link.stone.com.br';
+  await page.route(stoneCheckout, async route => {
     const id = new URL(route.request().url()).pathname.slice(1);
     const link = app.remote.links.get(id);
     assert.ok(link);
@@ -99,7 +101,7 @@ try {
     });
   });
   await page.getByRole('button', { name: 'FINALIZAR PAGAMENTO' }).click();
-  await page.waitForURL('https://payment-link.pagar.me/**');
+  await page.waitForURL(stoneCheckout);
   await page.getByRole('heading', { name: 'Pagar.me (provedor de teste)' }).waitFor();
   assert.equal(page.context().pages().length, 1);
   assert.equal(app.remote.linkPosts, 1);
@@ -126,7 +128,7 @@ try {
   app.remote.checkoutLookup = null;
   await app.db.query('UPDATE cs_trp_013_v2.orders SET checkout_synced_at=NULL WHERE id=$1', [pendingReference]);
   await page.getByRole('link', { name: 'CONTINUAR NA PAGAR.ME' }).click();
-  await page.waitForURL('https://payment-link.pagar.me/**');
+  await page.waitForURL(stoneCheckout);
   assert.equal(app.remote.linkPosts, 2);
   app.remote.complete(pendingReference, 'failed');
   await app.db.query('UPDATE cs_trp_013_v2.orders SET checkout_synced_at=NULL WHERE id=$1', [pendingReference]);

@@ -1,12 +1,25 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { firstKey, liveKey } from './fixture.mjs';
-import { makePagarme, ProviderError } from '../server/pagarme.mjs';
+import { hostedCheckoutUrl, makePagarme, ProviderError } from '../server/pagarme.mjs';
 import { makePool } from '../server/db.mjs';
 
 const reject = (promise, category, http = null) => assert.rejects(promise, error =>
   error instanceof ProviderError && error.category === category && error.http === http &&
   !Object.hasOwn(error, 'cause') && !Object.hasOwn(error, 'providerMessage'));
+
+test('Aceita somente os hosts oficiais de checkout em HTTPS', () => {
+  const path = '/pl_DemoCheckout';
+  for (const host of ['checkout.pagar.me', 'payment-link.pagar.me', 'payment-link.stone.com.br']) {
+    const url = 'https://' + host + path;
+    assert.equal(hostedCheckoutUrl(url), url);
+  }
+  for (const origin of [
+    'http://payment-link.stone.com.br', 'https://payment-link.stone.com.br:444',
+    'https://usuario@payment-link.stone.com.br', 'https://payment-link.stone.com.br.example',
+    'https://payment-link.stone.com.br@externo.example', 'https://outro.stone.com.br'
+  ]) assert.equal(hostedCheckoutUrl(origin + path), null);
+});
 
 test('Basic Auth, URLs oficiais por operação, User-Agent, corpo e idempotência', async () => {
   const calls = [];
