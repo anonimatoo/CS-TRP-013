@@ -117,19 +117,25 @@ try {
   await page.getByText('Pagamento aprovado', { exact: true }).waitFor();
   await page.getByRole('button', { name: 'Nova compra' }).click();
   await fillBuyer();
-  app.remote.nextLinkFault = 'timeout';
-  app.remote.checkoutLookup = () => Response.json({ data: [] });
+  app.remote.respondToCreation = ({ link, persist }) => {
+    persist();
+    return Response.json({ ...link, url: 'http://payment-link.stone.com.br/' + link.id }, { status: 201 });
+  };
+  app.remote.orderLookup = () => Response.json({ data: null });
+  app.remote.checkoutDetails = () => Response.json({}, { status: 503 });
   await page.getByRole('button', { name: 'FINALIZAR PAGAMENTO' }).click();
   await page.getByText('Falha ao confirmar o checkout', { exact: true }).waitFor();
   await page.getByText('Conciliação pendente com a Pagar.me.').waitFor();
   const pendingReference = new URL(page.url()).searchParams.get('pedido');
   assert.ok(pendingReference);
   assert.equal(await page.getByRole('link', { name: 'CONTINUAR NA PAGAR.ME' }).count(), 0);
-  app.remote.checkoutLookup = null;
+  app.remote.checkoutDetails = null;
   await app.db.query('UPDATE cs_trp_013_v2.orders SET checkout_synced_at=NULL WHERE id=$1', [pendingReference]);
   await page.getByRole('link', { name: 'CONTINUAR NA PAGAR.ME' }).click();
   await page.waitForURL(stoneCheckout);
   assert.equal(app.remote.linkPosts, 2);
+  assert.equal(page.context().pages().length, 1);
+  app.remote.orderLookup = null;
   app.remote.complete(pendingReference, 'failed');
   await app.db.query('UPDATE cs_trp_013_v2.orders SET checkout_synced_at=NULL WHERE id=$1', [pendingReference]);
   await page.getByRole('link', { name: 'Voltar à loja' }).click();

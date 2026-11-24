@@ -2,16 +2,42 @@ import { useEffect, useState } from 'react';
 import { api, brl, dateTime, explain, providerErrorLabel, reconciliations, statusLabel, type Environment } from '../services/api';
 import { Loader } from '../components/UI';
 
+interface Diagnostic {
+  operation: string; check: string; http: number | null; hostname?: string;
+  body?: { type: string; fields?: Record<string, string>; count?: number; fieldCount?: number };
+  data?: Diagnostic['body'];
+  cart?: Diagnostic['body'];
+}
 interface Row {
   id: string; account: string | null; status: string; amount: number; installments: number; created_at: string;
   provider_order: string | null; checkout_provider_id: string | null; provider_charge: string | null; provider_status: string | null;
   has_checkout_url: boolean; checkout_expires_at: string | null; checkout_attempted_at: string | null;
   checkout_http: number | null; checkout_error: string | null; reconciliation_state: string | null;
   reconciliation_http: number | null; reconciliation_error: string | null; reconciliation_at: string | null;
+  checkout_diagnostic: Diagnostic | null; reconciliation_diagnostics: Diagnostic[] | null;
   refusal_code: string | null; refusal_reason: string | null; http_status: number | null;
 }
 type Event = { id: number; provider_id: string | null; status: string; created_at: string };
 type Action = 'refresh' | 'capture' | 'cancel';
+
+const urlChecks: Record<string, string> = {
+  url_missing: 'URL ausente', url_invalid_type: 'Tipo inválido de URL', url_too_long: 'URL acima do tamanho permitido',
+  url_invalid_format: 'Formato de URL inválido', url_not_https: 'A URL precisa usar HTTPS',
+  url_has_credentials: 'A URL contém credenciais', url_nondefault_port: 'A URL usa porta diferente da padrão',
+  url_untrusted_host: 'O endereço está fora da lista de domínios autorizados'
+};
+
+function diagnosticText(diagnostic: Diagnostic) {
+  return [diagnostic.operation, diagnostic.http == null ? 'HTTP indisponível' : 'HTTP ' + diagnostic.http,
+    urlChecks[diagnostic.check] ?? diagnostic.check, diagnostic.hostname].filter(Boolean).join(' · ');
+}
+
+function diagnosticShape(value: Diagnostic['body']) {
+  if (!value) return null;
+  const fields = Object.entries(value.fields ?? {}).map(([name, type]) => name + ' (' + type + ')');
+  return [value.type, value.count == null ? null : value.count + ' registros',
+    value.fieldCount == null ? null : value.fieldCount + ' campos', ...fields].filter(Boolean).join(' · ');
+}
 
 export function Transactions({ env, csrf }: { env: Environment; csrf: string }) {
   const [result, setResult] = useState<{ rows: Row[]; hasNext: boolean }>();
@@ -87,6 +113,17 @@ export function Transactions({ env, csrf }: { env: Environment; csrf: string }) 
         <div><dt>Código de recusa</dt><dd>{details.row.refusal_code ?? '—'}</dd></div>
         <div className="span-full"><dt>Motivo informado pelo provedor</dt><dd>{details.row.refusal_reason ?? '—'}</dd></div>
       </dl>
+      {(details.row.checkout_diagnostic || details.row.reconciliation_diagnostics?.length) && <details>
+        <summary>Diagnóstico técnico da Pagar.me</summary>
+        <ul className="events">
+          {[details.row.checkout_diagnostic, ...(details.row.reconciliation_diagnostics ?? [])].map((entry, index) => entry &&
+            <li key={index}>
+              <strong>{diagnosticText(entry)}</strong>
+              {[entry.body, entry.data, entry.cart].map((value, shapeIndex) => value &&
+                <div key={shapeIndex}>{diagnosticShape(value)}</div>)}
+            </li>)}
+        </ul>
+      </details>}
       <ul className="events">{details.events.map(event => <li key={event.id}>{dateTime(event.created_at)} · {statusLabel(event.status)} {event.provider_id ?? ''}</li>)}</ul>
       <div className="gateway-actions">
         <button className="button secondary" disabled={busy} onClick={() => void run('refresh')}>{busy && <Loader />} Consultar provedor</button>

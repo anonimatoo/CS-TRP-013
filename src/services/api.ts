@@ -61,6 +61,7 @@ export const statusLabels: Record<string, string> = {
 export const statusLabel = (status: string) => statusLabels[status] ?? 'Status em atualização';
 export const reconciliations: Record<string, string> = {
   pending: 'Conciliação pendente', checkout_found: 'Checkout localizado', order_found: 'Pedido localizado',
+  checkout_found_order_unverified: 'Checkout localizado, consulta de pedidos pendente',
   closed_without_order: 'Link encerrado sem pedido', rejected: 'Criação rejeitada pelo provedor'
 };
 const providerErrors: Record<string, string> = {
@@ -70,6 +71,11 @@ const providerErrors: Record<string, string> = {
   provider_timeout: 'Tempo de resposta excedido', provider_dns: 'Falha de DNS',
   provider_tls: 'Falha na verificação TLS', provider_connection: 'Falha de conexão',
   provider_unavailable: 'Provedor indisponível', provider_non_json: 'Resposta fora do formato JSON',
+  orders_list_invalid_shape: 'Formato incompatível na lista de pedidos',
+  order_response_invalid_shape: 'Formato incompatível no pedido retornado',
+  checkout_list_invalid_shape: 'Formato incompatível na lista de links',
+  checkout_list_incomplete: 'Listagem de links incompleta',
+  checkout_response_invalid_shape: 'Formato incompatível nos dados do checkout',
   provider_invalid_json: 'Resposta incompatível com a API', provider_redirect: 'Redirecionamento inesperado da API',
   provider_not_found: 'Referência indisponível no provedor', provider_conflict: 'Solicitação em conflito',
   checkout_id_invalid: 'Identificador de checkout ausente ou inválido',

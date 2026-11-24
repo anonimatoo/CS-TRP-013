@@ -89,7 +89,7 @@ test('Diagnóstico, recuperação e limites de reenvio do checkout hospedado', a
   });
 
   for (const [category, body] of [
-    ['provider_invalid_json', () => []],
+    ['checkout_response_invalid_shape', () => []],
     ['checkout_id_invalid', link => ({ ...link, id: 'oops' })],
     ['checkout_id_invalid', ({ id, ...link }) => link],
     ['checkout_url_missing', ({ url, ...link }) => link],
@@ -191,6 +191,185 @@ test('Diagnóstico, recuperação e limites de reenvio do checkout hospedado', a
     assert.equal(app.remote.linkPosts, before);
   });
 
+  async function createRejectedStone(form) {
+    app.remote.respondToCreation = ({ link, persist }) => {
+      link.url = 'https://payment-link.stone.com.br/' + link.id;
+      persist();
+      return Response.json({ ...link, url: 'https://payment-link.stone.com.br:444/' + link.id + '?token=raw-private-payload' }, { status: 201 });
+    };
+    const order = await submit(form);
+    assert.equal(order.status, 'communication_error');
+    assert.equal(order.http, 201);
+    assert.equal(order.checkoutError, 'checkout_url_invalid');
+    assert.equal(order.checkoutUrl, null);
+    return [...app.remote.links.values()].find(link => app.remote.linkCodes.get(link.id) === form.id);
+  }
+
+  await t.test('HTTP 201 e GET de pedidos HTTP 200 incompatível recuperam o mesmo link pelo ID', async () => {
+    const form = input();
+    const link = await createRejectedStone(form);
+    const { data: failed } = await request('/admin/orders/' + form.id);
+    assert.equal(failed.row.checkout_provider_id, link.id);
+    assert.equal(failed.row.checkout_diagnostic.operation, 'POST /paymentlinks');
+    assert.equal(failed.row.checkout_diagnostic.check, 'url_nondefault_port');
+    assert.equal(failed.row.checkout_diagnostic.hostname, 'payment-link.stone.com.br');
+    assert.equal(failed.row.checkout_diagnostic.body.fields.url, 'string');
+
+    app.remote.orderLookup = () => Response.json({ data: { 'raw-private-payload': 'comprador@example.com' }, message: firstKey });
+    try {
+      const posts = app.remote.linkPosts;
+      const from = app.remote.calls.length;
+      const result = await submit(form);
+      assert.equal(result.checkoutUrl, link.url);
+      assert.equal(result.reconciliation, 'checkout_found_order_unverified');
+      assert.equal(result.newPurchaseAllowed, false);
+      assert.equal(app.remote.linkPosts, posts);
+      assert.deepEqual(app.remote.calls.slice(from).map(call => [call.method, call.route]),
+        [['GET', '/orders'], ['GET', '/paymentlinks/' + link.id]]);
+      const { data: details } = await request('/admin/orders/' + form.id);
+      assert.equal(details.row.checkout_http, 201);
+      assert.equal(details.row.reconciliation_http, 200);
+      assert.equal(details.row.reconciliation_error, 'orders_list_invalid_shape');
+      assert.equal(details.row.provider_order, null);
+      assert.equal(details.row.provider_charge, null);
+      assert.equal(details.row.reconciliation_diagnostics[0].operation, 'GET /orders');
+      assert.equal(details.row.reconciliation_diagnostics[0].check, 'orders_data_array');
+      assert.deepEqual(details.row.reconciliation_diagnostics[0].data, { fields: {}, fieldCount: 1, type: 'object' });
+      assert.equal((await request('/orders/' + form.id)).data.reconciliation_diagnostics, undefined);
+    } finally { app.remote.orderLookup = null; }
+  });
+
+  await t.test('Pedido legado sem ID atravessa paginação e confirma link existente por GET de detalhe', async () => {
+    const form = input();
+    const link = await createRejectedStone(form);
+    await app.db.query(`UPDATE cs_trp_013_v2.orders SET checkout_provider_id=NULL,
+      reconciliation_error='provider_invalid_json',reconciliation_http=200 WHERE id=$1`, [form.id]);
+    app.remote.orderLookup = () => Response.json({ data: null });
+    const pages = [];
+    app.remote.checkoutLookup = query => {
+      assert.equal(query.get('name'), link.name);
+      assert.equal(query.get('per_page'), '30');
+      const page = query.get('page');
+      pages.push(page);
+      return page === '1'
+        ? Response.json({ payment_links: [], paging: { next: 'https://example.invalid/' } })
+        : Response.json({ payment_links: [{ id: link.id, name: link.name }], paging: { next: null } });
+    };
+    app.remote.checkoutDetails = id => {
+      assert.equal(id, link.id);
+      return Response.json({ data: link });
+    };
+    try {
+      const posts = app.remote.linkPosts;
+      const { data: recovered } = await request('/orders/' + form.id);
+      assert.equal(recovered.checkoutUrl, link.url);
+      assert.equal(recovered.reconciliation, 'checkout_found_order_unverified');
+      assert.deepEqual(pages, ['1','2']);
+      assert.equal(app.remote.linkPosts, posts);
+      const { data: details } = await request('/admin/orders/' + form.id);
+      assert.equal(details.row.checkout_provider_id, link.id);
+    } finally {
+      app.remote.orderLookup = null;
+      app.remote.checkoutLookup = null;
+      app.remote.checkoutDetails = null;
+    }
+  });
+
+  await t.test('Registra os dois endpoints quando GET de pedidos e de links são incompatíveis', async () => {
+    const form = input();
+    await createRejectedStone(form);
+    await app.db.query('UPDATE cs_trp_013_v2.orders SET checkout_provider_id=NULL WHERE id=$1', [form.id]);
+    app.remote.orderLookup = () => Response.json({ data: null });
+    app.remote.checkoutLookup = () => Response.json({ errors: ['raw-private-payload'] });
+    try {
+      const posts = app.remote.linkPosts;
+      const { data: receipt } = await request('/orders/' + form.id);
+      assert.equal(receipt.reconciliation, 'pending');
+      assert.equal(receipt.checkoutUrl, null);
+      assert.equal(receipt.newPurchaseAllowed, false);
+      const { data: details } = await request('/admin/orders/' + form.id);
+      assert.equal(details.row.checkout_http, 201);
+      assert.equal(details.row.reconciliation_http, 200);
+      assert.equal(details.row.reconciliation_error, 'checkout_list_invalid_shape');
+      assert.deepEqual(details.row.reconciliation_diagnostics.map(diagnostic => [diagnostic.operation, diagnostic.check, diagnostic.http]),
+        [['GET /orders','orders_data_array',200],['GET /paymentlinks','paymentlinks_collection',200]]);
+      assert.equal(app.remote.linkPosts, posts);
+    } finally {
+      app.remote.orderLookup = null;
+      app.remote.checkoutLookup = null;
+    }
+  });
+
+  await t.test('Falha no detalhe preserva o ID e diferencia formato do checkout e consultas', async () => {
+    const form = input();
+    const link = await createRejectedStone(form);
+    app.remote.orderLookup = () => Response.json({ data: false });
+    app.remote.checkoutDetails = () => Response.json({ ...link, cart_settings: { total_cost: 'raw-private-payload' } });
+    try {
+      const { data: receipt } = await request('/orders/' + form.id);
+      assert.equal(receipt.checkoutUrl, null);
+      assert.equal(receipt.newPurchaseAllowed, false);
+      const { data: details } = await request('/admin/orders/' + form.id);
+      assert.equal(details.row.checkout_provider_id, link.id);
+      assert.equal(details.row.reconciliation_error, 'checkout_response_invalid_shape');
+      assert.equal(details.row.reconciliation_diagnostics[1].operation, 'GET /paymentlinks/{id}');
+      assert.equal(details.row.reconciliation_diagnostics[1].check, 'checkout_cart_total');
+      assert.deepEqual(details.row.reconciliation_diagnostics[1].cart.fields, { total_cost: 'string' });
+    } finally {
+      app.remote.orderLookup = null;
+      app.remote.checkoutDetails = null;
+    }
+  });
+
+  await t.test('Consulta de pedidos incompatível mantém link usado, expirado ou sem limite comprovado em conciliação', async () => {
+    app.remote.orderLookup = () => Response.json({ data: null });
+    try {
+      for (const fields of [{ total_sessions: 1 }, { status: 'expired' }, { max_sessions: 0 }]) {
+        const form = input();
+        const link = await createRejectedStone(form);
+        Object.assign(link, fields);
+        const posts = app.remote.linkPosts;
+        const { data: receipt } = await request('/orders/' + form.id);
+        assert.equal(receipt.reconciliation, 'pending');
+        assert.equal(receipt.checkoutUrl, null);
+        assert.equal(receipt.newPurchaseAllowed, false);
+        assert.equal(app.remote.linkPosts, posts);
+      }
+    } finally { app.remote.orderLookup = null; }
+  });
+
+  await t.test('Evidência de pedido em resposta incompatível impede exibir o link existente', async () => {
+    const form = input();
+    const link = await createRejectedStone(form);
+    app.remote.orderLookup = () => Response.json({ items: [{ code: form.id, id: 'or_AlreadyExists' }] });
+    try {
+      const { data: receipt } = await request('/orders/' + form.id);
+      assert.equal(receipt.reconciliation, 'pending');
+      assert.equal(receipt.checkoutUrl, null);
+      assert.equal(receipt.newPurchaseAllowed, false);
+      const { data: details } = await request('/admin/orders/' + form.id);
+      assert.equal(details.row.checkout_provider_id, link.id);
+      assert.equal(details.row.reconciliation_diagnostics[0].matchingOrderEvidence, true);
+    } finally { app.remote.orderLookup = null; }
+  });
+
+  await t.test('Link em página adicional gera ambiguidade quando existe mais de uma referência correspondente', async () => {
+    const form = input();
+    const link = await createRejectedStone(form);
+    await app.db.query('UPDATE cs_trp_013_v2.orders SET checkout_provider_id=NULL WHERE id=$1', [form.id]);
+    app.remote.checkoutLookup = query => query.get('page') === '1'
+      ? Response.json({ data: [{ id: link.id, name: link.name }], paging: { next: 'page-2' } })
+      : Response.json({ data: [{ id: 'pl_ConflictingReference', name: link.name }], paging: { next: null } });
+    try {
+      const { data: receipt } = await request('/orders/' + form.id);
+      assert.equal(receipt.checkoutUrl, null);
+      assert.equal(receipt.newPurchaseAllowed, false);
+      const { data: details } = await request('/admin/orders/' + form.id);
+      assert.equal(details.row.checkout_provider_id, null);
+      assert.equal(details.row.reconciliation_error, 'checkout_reference_ambiguous');
+    } finally { app.remote.checkoutLookup = null; }
+  });
+
   await t.test('Recupera o checkout existente e conserva o erro original da criação', async () => {
     app.remote.nextLinkFault = 'timeout';
     const form = input();
@@ -256,7 +435,8 @@ test('Diagnóstico, recuperação e limites de reenvio do checkout hospedado', a
       assert.equal(order.newPurchaseAllowed, false);
       assert.equal(app.remote.linkPosts, before);
       const { data: details } = await request('/admin/orders/' + order.id);
-      assert.equal(details.row.reconciliation_error, 'provider_invalid_json');
+      assert.equal(details.row.reconciliation_error, 'checkout_list_invalid_shape');
+      assert.equal(details.row.reconciliation_diagnostics[0].operation, 'GET /paymentlinks');
     } finally { app.remote.checkoutLookup = null; }
   });
 

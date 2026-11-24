@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { digits, validCpf, states } from '../shared/validation.mjs';
 import { audit, one } from './db.mjs';
 import { gatewayRow, gatewaySecret } from './gateway.mjs';
-import { hostedCheckoutName, hostedCheckoutUrl, ProviderError, providerId, readPayment } from './pagarme.mjs';
+import { hostedCheckoutName, hostedCheckoutUrl, inspectCheckoutUrl, ProviderError, providerId, readPayment } from './pagarme.mjs';
 import { HttpError } from './security.mjs';
 
 const required = (max) => z.string().trim().min(1).max(max).refine(value => !/[\u0000-\u001f\u007f]/.test(value));
@@ -29,8 +29,72 @@ const closedLinkStatuses = ['expired','cancelled','canceled'];
 const rejectedCreation = new Set([400,401,403,422]);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 
+const incompleteOrderLists = ['orders_list_invalid_shape', 'provider_non_json'];
+const inconsistentOrders = [...incompleteOrderLists, 'order_reference_mismatch', 'order_reference_ambiguous',
+  'order_response_invalid_shape', 'order_amount_mismatch'];
+const linkPageSize = 30;
+const linkPageLimit = 5;
+const linkCollectionFields = ['data', 'payment_links', 'paymentlinks', 'links', 'items', 'results'];
+const diagnosticFields = [
+  ...linkCollectionFields, 'paging', 'pagination', 'next', 'next_page', 'has_next', 'total', 'total_pages',
+  'id', 'code', 'order', 'orders', 'order_code', 'name', 'url', 'type', 'status', 'amount', 'charges', 'cart_settings',
+  'total_cost', 'payment_settings', 'credit_card_settings', 'installments', 'created_at', 'expires_at',
+  'expires_in', 'total_sessions', 'total_paid_sessions', 'max_sessions', 'max_paid_sessions', 'message', 'errors'
+];
+
+const dataType = value => value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+
+function shape(value) {
+  if (Array.isArray(value)) return { type: 'array', count: value.length };
+  if (!object(value)) return { type: dataType(value) };
+  return {
+    type: 'object',
+    fields: Object.fromEntries(diagnosticFields.filter(field => Object.hasOwn(value, field))
+      .map(field => [field, dataType(value[field])])),
+    fieldCount: Object.keys(value).length
+  };
+}
+
+function responseError(operation, result, check, category, extra) {
+  return new ProviderError(result.http, category, {
+    operation, http: result.http, check, body: shape(result.data),
+    ...(result.data?.data != null ? { data: shape(result.data.data) } : {}),
+    ...extra
+  });
+}
+
+function linkCollection(body) {
+  if (Array.isArray(body)) return { entries: body };
+  if (!object(body)) return {};
+  const arrays = [body, body.data].filter(object).flatMap(container => linkCollectionFields
+    .filter(field => Array.isArray(container[field]))
+    .map(field => ({ entries: container[field], paging: container.paging ?? container.pagination ?? body.paging ?? body.pagination })));
+  return arrays.length === 1 ? arrays[0] : {};
+}
+
+function hasMoreLinks(paging, page, count) {
+  if (paging == null) return count === linkPageSize;
+  if (!object(paging)) return null;
+  const { next, next_page: nextPage, has_next: hasNext, total, total_pages: totalPages } = paging;
+  if ((next != null && typeof next !== 'string') ||
+      (nextPage != null && nextPage !== 0 && (!Number.isSafeInteger(nextPage) || nextPage <= page)) ||
+      (hasNext != null && typeof hasNext !== 'boolean') ||
+      [total, totalPages].some(value => value != null && (!Number.isSafeInteger(value) || value < 0))) return null;
+  if (!['next', 'next_page', 'has_next', 'total', 'total_pages'].some(field => Object.hasOwn(paging, field))) return null;
+  return Boolean(next || nextPage || hasNext || total > page * linkPageSize || totalPages > page);
+}
+
+function correlatedCheckoutId(row, data, requireName = false) {
+  if (!object(data) || (requireName && data.name !== hostedCheckoutName(row.id)) ||
+      (data.name != null && data.name !== hostedCheckoutName(row.id)) ||
+      (data.order_code != null && data.order_code !== row.id)) return null;
+  const id = providerId(data.id, 'pl');
+  return !row.checkout_provider_id || id === row.checkout_provider_id ? id : null;
+}
+
 export function publicOrder(row) {
-  const checkoutUrl = row.status === 'pending' && !row.provider_order && row.reconciliation_state !== 'pending' &&
+  const checkoutUrl = row.status === 'pending' && !row.provider_order && !row.provider_charge &&
+    (row.reconciliation_state == null || ['checkout_found','checkout_found_order_unverified'].includes(row.reconciliation_state)) &&
     Date.parse(row.checkout_expires_at) > Date.now() ? hostedCheckoutUrl(row.checkout_url) : null;
   return {
     id: row.id, status: row.status, amount: row.amount, installments: row.installments, environment: row.environment,
@@ -49,43 +113,52 @@ function checkoutDate(value) {
   return typeof value === 'string' && z.iso.datetime({ offset: true }).safeParse(value).success ? Date.parse(value) : NaN;
 }
 
-function validateCheckout(row, data, http) {
-  const require = (condition, category) => {
-    if (!condition) throw new ProviderError(http, category);
+function validateCheckout(row, result, operation) {
+  const envelope = result.data;
+  const data = operation === 'GET /paymentlinks/{id}' && object(envelope) &&
+    !Object.hasOwn(envelope, 'id') && object(envelope.data) ? envelope.data : envelope;
+  const require = (condition, check, category = 'checkout_response_invalid_shape', extra) => {
+    if (!condition) throw responseError(operation, result, check, category, extra);
   };
-  require(object(data), 'provider_invalid_json');
+  require(object(data), 'checkout_object');
   const id = providerId(data.id, 'pl');
-  require(id && (!row.checkout_provider_id || id === row.checkout_provider_id), 'checkout_id_invalid');
-  require(data.url != null && data.url !== '', 'checkout_url_missing');
-  const url = hostedCheckoutUrl(data.url);
-  require(url, 'checkout_url_invalid');
-  require(data.name != null, 'checkout_incomplete');
-  require(data.name === hostedCheckoutName(row.id) && (data.order_code == null || data.order_code === row.id), 'checkout_reference_mismatch');
-  require(data.type === 'order', data.type == null ? 'checkout_incomplete' : 'provider_invalid_json');
+  require(id && (!row.checkout_provider_id || id === row.checkout_provider_id), 'checkout_id', 'checkout_id_invalid');
+  require(data.name == null || data.name === hostedCheckoutName(row.id), 'checkout_name', 'checkout_reference_mismatch');
+  require(data.order_code == null || data.order_code === row.id, 'checkout_order_code', 'checkout_reference_mismatch');
+  const url = inspectCheckoutUrl(data.url);
+  require(url.url, url.reason, url.reason === 'url_missing' ? 'checkout_url_missing' : 'checkout_url_invalid',
+    url.hostname ? { hostname: url.hostname } : undefined);
+  require(data.name != null, 'checkout_name', 'checkout_incomplete');
+  require(data.type === 'order', 'checkout_type', data.type == null ? 'checkout_incomplete' : 'checkout_response_invalid_shape');
   const total = data.cart_settings?.total_cost;
-  require(total != null, 'checkout_incomplete');
-  require(Number.isSafeInteger(total), 'provider_invalid_json');
-  require(total === row.amount, 'checkout_amount_mismatch');
+  require(total != null, 'checkout_cart_total', 'checkout_incomplete');
+  require(Number.isSafeInteger(total), 'checkout_cart_total', 'checkout_response_invalid_shape', { cart: shape(data.cart_settings) });
+  require(total === row.amount, 'checkout_cart_total', 'checkout_amount_mismatch');
   const plans = data.payment_settings?.credit_card_settings?.installments;
   if (plans != null) {
     require(Array.isArray(plans) && plans.length === 1 && plans[0]?.number === row.installments &&
-      plans[0]?.total === row.amount, 'checkout_installments_mismatch');
+      plans[0]?.total === row.amount, 'checkout_installments', 'checkout_installments_mismatch');
   }
-  require(data.status != null && data.total_sessions != null, 'checkout_incomplete');
-  require(['active', 'building', ...closedLinkStatuses].includes(data.status) &&
-    Number.isSafeInteger(data.total_sessions) && data.total_sessions >= 0, 'provider_invalid_json');
+  require(data.status != null && data.total_sessions != null, 'checkout_session_state', 'checkout_incomplete');
+  require(['active', 'building', ...closedLinkStatuses].includes(data.status), 'checkout_status');
+  const paidSessions = data.total_paid_sessions ?? 0;
+  require(Number.isSafeInteger(data.total_sessions) && data.total_sessions >= 0 &&
+    Number.isSafeInteger(paidSessions) && paidSessions >= 0 && paidSessions <= data.total_sessions, 'checkout_session_counters');
 
   const created = checkoutDate(data.created_at);
   const absolute = checkoutDate(data.expires_at);
   require((data.created_at == null || Number.isFinite(created)) && (data.expires_at == null || Number.isFinite(absolute)),
-    'checkout_date_invalid');
-  require(Number.isFinite(absolute) || Number.isFinite(created), 'checkout_incomplete');
+    'checkout_dates', 'checkout_date_invalid');
+  require(Number.isFinite(absolute) || Number.isFinite(created), 'checkout_dates', 'checkout_incomplete');
   const duration = data.expires_in ?? checkoutMinutes;
-  require(Number.isSafeInteger(duration) && duration >= 0 && (duration > 0 || Number.isFinite(absolute)), 'checkout_date_invalid');
+  require(Number.isSafeInteger(duration) && duration >= 0 && (duration > 0 || Number.isFinite(absolute)), 'checkout_duration', 'checkout_date_invalid');
   const cap = Number.isFinite(created) ? created + checkoutMinutes * 60000 : absolute;
   const expires = new Date(Math.min(cap, Number.isFinite(absolute) ? absolute : created + duration * 60000));
-  require(Number.isFinite(expires.getTime()) && (!Number.isFinite(created) || expires.getTime() >= created), 'checkout_date_invalid');
-  return { id, url, expires, remoteStatus: data.status, used: data.total_sessions > 0 };
+  require(Number.isFinite(expires.getTime()) && (!Number.isFinite(created) || expires.getTime() >= created), 'checkout_dates', 'checkout_date_invalid');
+  return {
+    id, url: url.url, expires, remoteStatus: data.status, used: data.total_sessions > 0,
+    singleSession: data.max_sessions === 1 && data.max_paid_sessions === 1
+  };
 }
 
 function billingDetails(buyer) {
@@ -121,7 +194,7 @@ export function makePayments(db, config, pagarme) {
       status=$4,http_status=$5,refusal_code=$6,refusal_reason=$7,provider_status=$8,
       provider_updated_at=COALESCE($9,provider_updated_at),actual_paid=COALESCE($10,actual_paid),
       reconciliation_state=CASE WHEN hosted_checkout THEN 'order_found' ELSE reconciliation_state END,
-      reconciliation_error=NULL,reconciliation_http=$5,reconciliation_at=now(),updated_at=now()
+      reconciliation_error=NULL,reconciliation_http=$5,reconciliation_diagnostics=NULL,reconciliation_at=now(),updated_at=now()
       WHERE id=$1 RETURNING *`,
     [id, providerOrder, snapshot.chargeId, snapshot.status, http, snapshot.refusalCode,
       snapshot.refusalReason, snapshot.providerStatus, snapshot.updatedAt, snapshot.paid]);
@@ -165,33 +238,68 @@ export function makePayments(db, config, pagarme) {
     });
   }
 
-  async function storeCheckout(row, data, http, creationHttp = null) {
-    const link = validateCheckout(row, data, http);
+  async function providerRead(operation, key, path, signal) {
+    try {
+      return await pagarme(key, path, { signal });
+    } catch (error) {
+      if (!(error instanceof ProviderError)) throw error;
+      throw new ProviderError(error.http, error.category, { operation, http: error.http, check: error.category });
+    }
+  }
+
+  async function rememberCheckout(row, result, operation) {
+    const id = correlatedCheckoutId(row, result.data, operation === 'GET /paymentlinks');
+    if (!id || row.checkout_provider_id) return row;
+    try {
+      const updated = await one(db, `UPDATE cs_trp_013_v2.orders SET checkout_provider_id=$2,updated_at=now()
+        WHERE id=$1 AND checkout_provider_id IS NULL RETURNING *`, [row.id, id]);
+      const stored = updated ?? await get(row.id);
+      if (stored.checkout_provider_id === id) return { ...row, checkout_provider_id: id };
+    } catch (error) {
+      if (error.code !== '23505' || error.constraint !== 'orders_checkout_provider_id_key') throw error;
+    }
+    throw responseError(operation, result, 'checkout_id_conflict', 'checkout_reference_ambiguous');
+  }
+
+  async function storeCheckout(row, result, { operation, creationHttp = null, orderError } = {}) {
+    const link = validateCheckout(row, result, operation);
     const closed = closedLinkStatuses.includes(link.remoteStatus);
-    const available = link.remoteStatus === 'active' && !link.used && link.expires.getTime() > Date.now();
-    const state = available ? 'checkout_found' : closed && !link.used ? 'closed_without_order' : 'pending';
-    const status = closed && !link.used ? (link.remoteStatus === 'expired' ? 'expired' : 'canceled') : 'pending';
+    const available = link.remoteStatus === 'active' && !link.used && link.expires.getTime() > Date.now() &&
+      (!orderError || (link.singleSession && incompleteOrderLists.includes(orderError.category) &&
+        !orderError.diagnostic.matchingOrderEvidence));
+    const closedWithoutOrder = closed && !link.used && !orderError && creationHttp == null;
+    const state = available ? (orderError ? 'checkout_found_order_unverified' : 'checkout_found') :
+      closedWithoutOrder ? 'closed_without_order' : 'pending';
+    const status = closedWithoutOrder ? (link.remoteStatus === 'expired' ? 'expired' : 'canceled') : 'pending';
+    const diagnostics = orderError ? JSON.stringify([orderError.diagnostic]) : null;
     return await one(db, `UPDATE cs_trp_013_v2.orders SET checkout_provider_id=$2,checkout_url=$3,checkout_expires_at=$4,
       status=$5,http_status=$6,reconciliation_state=$7,
       checkout_http=COALESCE($8,checkout_http),
-      checkout_synced_at=CASE WHEN checkout_provider_id IS NULL AND $7::text='checkout_found' THEN NULL ELSE checkout_synced_at END,
-      reconciliation_error=NULL,reconciliation_http=$10,reconciliation_at=now(),updated_at=now()
+      checkout_synced_at=CASE WHEN checkout_url IS NULL AND $7::text='checkout_found' THEN NULL ELSE checkout_synced_at END,
+      reconciliation_error=$11,reconciliation_http=$10,reconciliation_diagnostics=$12::jsonb,reconciliation_at=now(),updated_at=now()
       WHERE id=$1 AND (checkout_provider_id IS NULL OR checkout_provider_id=$2)
-      AND provider_order IS NULL
+      AND provider_order IS NULL AND provider_charge IS NULL
       AND (reconciliation_at IS NULL OR reconciliation_at <= $9) RETURNING *`,
-    [row.id, link.id, link.url, link.expires, status, creationHttp ?? http, state, creationHttp,
-      row.reconcileStartedAt ?? row.checkout_attempted_at, http]) ?? await get(row.id);
+    [row.id, link.id, available ? link.url : null, link.expires, status, creationHttp ?? result.http, state, creationHttp,
+      row.reconcileStartedAt ?? row.checkout_attempted_at, orderError?.http ?? result.http, orderError?.category ?? null, diagnostics])
+      ?? await get(row.id);
   }
 
-  async function storeCheckoutResponse(key, row, result, creationHttp = null) {
+  async function storeCheckoutResponse(key, row, result, { operation, creationHttp, orderError, signal }) {
+    const linked = await rememberCheckout(row, result, operation);
+    // A collection entry can be a summary. Confirm the chosen reference through the authenticated detail endpoint.
+    if (operation === 'GET /paymentlinks' && correlatedCheckoutId(linked, result.data, true)) {
+      const id = linked.checkout_provider_id;
+      const detail = await providerRead('GET /paymentlinks/{id}', key, '/paymentlinks/' + id, signal);
+      return storeCheckout(linked, detail, { operation: 'GET /paymentlinks/{id}', orderError });
+    }
     try {
-      return await storeCheckout(row, result.data, result.http, creationHttp);
+      return await storeCheckout(linked, result, { operation, creationHttp, orderError });
     } catch (error) {
-      const id = providerId(result.data?.id, 'pl');
-      if (!(error instanceof ProviderError) || !id ||
-          !['checkout_incomplete', 'checkout_url_missing'].includes(error.category)) throw error;
-      const detail = await pagarme(key, '/paymentlinks/' + id);
-      return storeCheckout({ ...row, checkout_provider_id: id }, detail.data, detail.http, creationHttp);
+      if (!(error instanceof ProviderError) || !correlatedCheckoutId(linked, result.data) ||
+          !['checkout_incomplete', 'checkout_url_missing'].includes(error.category) || operation !== 'POST /paymentlinks') throw error;
+      const detail = await providerRead('GET /paymentlinks/{id}', key, '/paymentlinks/' + linked.checkout_provider_id, signal);
+      return storeCheckout(linked, detail, { operation: 'GET /paymentlinks/{id}', creationHttp, orderError });
     }
   }
 
@@ -227,18 +335,24 @@ export function makePayments(db, config, pagarme) {
         ...(returnUrl.protocol === 'https:' ? { flow_settings: { success_url: returnUrl.href } } : {})
       } });
       http = result.http;
-      const saved = await storeCheckoutResponse(key, row, result, http);
+      const saved = await storeCheckoutResponse(key, row, result, { operation: 'POST /paymentlinks', creationHttp: http });
       await recordCreation(gateway, row, http);
       return saved;
     } catch (error) {
       if (!(error instanceof ProviderError)) throw error;
       const recordedHttp = http ?? error.http;
       const rejected = http === null && (rejectedCreation.has(error.http) || error.category === 'gateway_configuration');
-      console.warn('Falha no checkout Pagar.me', { order: row.id, environment: row.environment, http: recordedHttp, category: error.category });
-      const saved = await one(db, `UPDATE cs_trp_013_v2.orders SET status=$2,http_status=$3,checkout_http=$3,checkout_error=$4,
-        checkout_attempted_at=COALESCE(checkout_attempted_at,now()),reconciliation_state=$5,updated_at=now()
-        WHERE id=$1 AND provider_order IS NULL AND checkout_provider_id IS NULL RETURNING *`,
-      [row.id, rejected ? 'request_failed' : 'communication_error', recordedHttp, error.category, rejected ? 'rejected' : 'pending'])
+      const diagnostic = error.diagnostic ?? { operation: 'POST /paymentlinks', http: error.http, check: error.category };
+      console.warn('Falha no checkout Pagar.me', { order: row.id, environment: row.environment, http: recordedHttp, category: error.category, diagnostic });
+      const saved = await one(db, `UPDATE cs_trp_013_v2.orders SET
+        status=CASE WHEN checkout_url IS NULL AND provider_order IS NULL AND reconciliation_at IS NULL THEN $2 ELSE status END,
+        http_status=CASE WHEN reconciliation_at IS NULL THEN $3 ELSE http_status END,
+        checkout_http=$3,checkout_error=$4,checkout_diagnostic=$6::jsonb,
+        checkout_attempted_at=COALESCE(checkout_attempted_at,now()),
+        reconciliation_state=CASE WHEN reconciliation_at IS NULL THEN $5 ELSE reconciliation_state END,updated_at=now()
+        WHERE id=$1 RETURNING *`,
+      [row.id, rejected ? 'request_failed' : 'communication_error', recordedHttp, error.category, rejected ? 'rejected' : 'pending',
+        JSON.stringify(diagnostic)])
         ?? await get(row.id);
       await recordCreation(gateway, row, recordedHttp, error.category);
       return saved;
@@ -261,47 +375,92 @@ export function makePayments(db, config, pagarme) {
     return paymentSecret(gateway);
   }
 
-  async function findProviderOrder(key, row) {
-    if (row.provider_order) return pagarme(key, '/orders/' + row.provider_order);
-    const result = await pagarme(key, '/orders?size=2&code=' + row.id);
-    const list = result.data?.data;
-    if (!Array.isArray(list)) throw new ProviderError(result.http, 'provider_invalid_json');
-    const matches = list.filter(order => order?.code === row.id);
-    if (matches.length > 1 || result.data?.paging?.next) {
-      throw new ProviderError(result.http, 'order_reference_ambiguous');
+  async function findProviderOrder(key, row, signal) {
+    if (row.provider_order) return {
+      ...await providerRead('GET /orders/{id}', key, '/orders/' + row.provider_order, signal),
+      operation: 'GET /orders/{id}'
+    };
+    const operation = 'GET /orders';
+    const result = await providerRead(operation, key, '/orders?size=2&code=' + row.id, signal);
+    const body = result.data;
+    const list = body?.data;
+    if (!Array.isArray(list) || (body.errors != null && (!Array.isArray(body.errors) || body.errors.length > 0))) {
+      const possible = [body, list].flatMap(value => [value, value?.orders, value?.order,
+        ...linkCollectionFields.map(field => value?.[field])]);
+      const found = possible.flatMap(value => Array.isArray(value) ? value : [value]).some(order => order?.code === row.id);
+      const check = Array.isArray(list) ? 'orders_error_envelope' : 'orders_data_array';
+      throw responseError(operation, result, check, 'orders_list_invalid_shape',
+        found ? { matchingOrderEvidence: true } : undefined);
     }
-    if (list.some(order => order?.code !== row.id)) throw new ProviderError(result.http, 'order_reference_mismatch');
-    return { http: result.http, data: matches[0] };
+    const paging = body.paging;
+    if (paging != null && (!object(paging) ||
+        (paging.next != null && typeof paging.next !== 'string') ||
+        (paging.total != null && (!Number.isSafeInteger(paging.total) || paging.total < list.length)))) {
+      throw responseError(operation, result, 'orders_paging', 'orders_list_invalid_shape',
+        list.length ? { matchingOrderEvidence: true } : undefined);
+    }
+    if (list.length > 1 || paging?.next || paging?.total > list.length) {
+      throw responseError(operation, result, 'orders_reference_unique', 'order_reference_ambiguous');
+    }
+    if (list.some(order => order?.code !== row.id)) {
+      throw responseError(operation, result, 'order_code', 'order_reference_mismatch');
+    }
+    return { http: result.http, data: list[0], operation };
   }
 
-  async function setReconciliation(row, http, error = null, state = 'pending') {
+  async function setReconciliation(row, { http, error = null, diagnostics = [], state = 'pending', blockCheckout = false }) {
     return await one(db, `UPDATE cs_trp_013_v2.orders SET
       status=CASE WHEN status='processing' AND provider_order IS NULL THEN 'communication_error' ELSE status END,
       reconciliation_state=CASE WHEN provider_order IS NULL AND reconciliation_state IS DISTINCT FROM 'rejected'
-        AND (reconciliation_state IS NULL OR reconciliation_state='pending' OR
+        AND ($7 OR reconciliation_state IS NULL OR reconciliation_state IN ('pending','checkout_found_order_unverified') OR
           (reconciliation_state='checkout_found' AND checkout_expires_at<=now())) THEN $5 ELSE reconciliation_state END,
-      reconciliation_error=$2,reconciliation_http=$3,reconciliation_at=now()
+      reconciliation_error=$2,reconciliation_http=$3,reconciliation_diagnostics=$6::jsonb,reconciliation_at=now()
       WHERE id=$1 AND (reconciliation_at IS NULL OR reconciliation_at <= $4) RETURNING *`,
-    [row.id, error, http, row.reconcileStartedAt, state]) ?? await get(row.id);
+    [row.id, error, http, row.reconcileStartedAt, state, diagnostics.length ? JSON.stringify(diagnostics) : null, blockCheckout])
+      ?? await get(row.id);
   }
 
-  async function refreshHostedCheckout(key, row) {
-    if (row.checkout_provider_id) {
-      if (row.reconciliation_state !== 'pending' && Date.parse(row.checkout_expires_at) > Date.now()) return row;
-      const result = await pagarme(key, '/paymentlinks/' + row.checkout_provider_id);
-      return storeCheckout(row, result.data, result.http);
-    }
+  async function findProviderCheckout(key, row, signal) {
+    const operation = 'GET /paymentlinks';
     const name = hostedCheckoutName(row.id);
-    const result = await pagarme(key, '/paymentlinks?per_page=30&name=' + encodeURIComponent(name));
-    const entries = Array.isArray(result.data) ? result.data : result.data?.data;
-    if (!Array.isArray(entries)) throw new ProviderError(result.http, 'provider_invalid_json');
-    const matches = entries.filter(link => link?.name === name);
-    if (matches.length > 1 || (matches.length && (entries.length === 30 || result.data?.paging?.next))) {
-      throw new ProviderError(result.http, 'checkout_reference_ambiguous');
+    const query = new URLSearchParams({ per_page: String(linkPageSize), name });
+    let match;
+    for (let page = 1; page <= linkPageLimit; page++) {
+      query.set('page', String(page));
+      const result = await providerRead(operation, key, '/paymentlinks?' + query, signal);
+      const { entries, paging } = linkCollection(result.data);
+      if (!entries || entries.length > linkPageSize || !entries.every(link => object(link) && typeof link.name === 'string')) {
+        throw responseError(operation, result, 'paymentlinks_collection', 'checkout_list_invalid_shape');
+      }
+      for (const entry of entries) {
+        if (entry.name !== name) continue;
+        if (match) throw responseError(operation, result, 'paymentlinks_reference_unique', 'checkout_reference_ambiguous');
+        match = { ...result, data: entry };
+      }
+      const more = hasMoreLinks(paging, page, entries.length);
+      if (more === null) throw responseError(operation, result, 'paymentlinks_paging', 'checkout_list_invalid_shape');
+      if (!more) return { match, http: result.http };
+      if (page === linkPageLimit) {
+        throw responseError(operation, result, 'paymentlinks_paging_limit', 'checkout_list_incomplete');
+      }
     }
-    if (matches[0]) return storeCheckoutResponse(key, row, { data: matches[0], http: result.http });
-    const rejected = row.status === 'request_failed' && rejectedCreation.has(row.http_status);
-    return setReconciliation(row, result.http, null, rejected ? 'rejected' : 'pending');
+  }
+
+  async function refreshHostedCheckout(key, row, { orderError, signal }) {
+    if (row.checkout_provider_id) {
+      if (!orderError && row.reconciliation_state === 'checkout_found' && Date.parse(row.checkout_expires_at) > Date.now()) return row;
+      const operation = 'GET /paymentlinks/{id}';
+      const result = await providerRead(operation, key, '/paymentlinks/' + row.checkout_provider_id, signal);
+      return storeCheckout(row, result, { operation, orderError });
+    }
+    const { match, http } = await findProviderCheckout(key, row, signal);
+    if (match) return storeCheckoutResponse(key, row, match, { operation: 'GET /paymentlinks', orderError, signal });
+    const rejected = !orderError && row.status === 'request_failed' && rejectedCreation.has(row.http_status);
+    return setReconciliation(row, {
+      http: orderError?.http ?? http, error: orderError?.category,
+      diagnostics: orderError ? [orderError.diagnostic] : [],
+      state: rejected ? 'rejected' : 'pending', blockCheckout: Boolean(orderError)
+    });
   }
 
   async function status(row) {
@@ -315,41 +474,57 @@ export function makePayments(db, config, pagarme) {
   }
 
   async function applyProviderOrder(row, result) {
-    const data = result.data;
+    const { data, operation = 'GET /orders/{id}' } = result;
     const id = providerId(data?.id, 'or');
     if (!id || (row.provider_order && id !== row.provider_order) || data.code !== row.id) {
-      throw new ProviderError(result.http, 'order_reference_mismatch');
+      throw responseError(operation, result, 'order_id_and_code', 'order_reference_mismatch');
     }
     if (!['pending','paid','canceled','failed'].includes(data.status) ||
         (data.charges != null && (!Array.isArray(data.charges) || data.charges.length > 1))) {
-      throw new ProviderError(result.http, 'provider_invalid_json');
+      throw responseError(operation, result, 'order_status_or_charges', 'order_response_invalid_shape');
     }
     const charge = data.charges?.[0];
     if (data.amount !== row.amount || (charge && charge.amount !== row.amount)) {
-      throw new ProviderError(result.http, 'order_amount_mismatch');
+      throw responseError(operation, result, 'order_amount', 'order_amount_mismatch');
     }
     const snapshot = readPayment(charge, data.status);
-    if (charge && !snapshot.chargeId) throw new ProviderError(result.http, 'order_reference_mismatch');
+    if (charge && !snapshot.chargeId) throw responseError(operation, result, 'charge_id', 'order_reference_mismatch');
     if (!snapshot.updatedAt && Number.isFinite(Date.parse(data.updated_at))) snapshot.updatedAt = new Date(data.updated_at);
     return db.tx(client => apply(client, row.id, id, snapshot, result.http));
   }
 
   async function refresh(row, { background = false } = {}) {
     const current = { ...row, reconcileStartedAt: new Date() };
+    const signal = AbortSignal.timeout(22000);
+    let orderError;
     try {
       const key = await keyFor(row);
       if (row.provider_charge) {
-        const response = await pagarme(key, '/charges/' + row.provider_charge);
-        if (response.data?.id !== row.provider_charge) throw new ProviderError(response.http, 'order_reference_mismatch');
-        if (response.data?.amount !== row.amount) throw new ProviderError(response.http, 'order_amount_mismatch');
-        return await db.tx(client => apply(client, row.id, row.provider_order, readPayment(response.data), response.http));
+        const operation = 'GET /charges/{id}';
+        const result = await providerRead(operation, key, '/charges/' + row.provider_charge, signal);
+        if (result.data?.id !== row.provider_charge) throw responseError(operation, result, 'charge_id', 'order_reference_mismatch');
+        if (result.data?.amount !== row.amount) throw responseError(operation, result, 'charge_amount', 'order_amount_mismatch');
+        return await db.tx(client => apply(client, row.id, row.provider_order, readPayment(result.data), result.http));
       }
-      const result = await findProviderOrder(key, row);
-      if (result.data !== undefined) return await applyProviderOrder(row, result);
-      return row.hosted_checkout ? await refreshHostedCheckout(key, current) : row;
+      try {
+        const result = await findProviderOrder(key, row, signal);
+        if (result.data !== undefined) return await applyProviderOrder(row, result);
+      } catch (error) {
+        const incompatible = error instanceof ProviderError && error.diagnostic?.operation === 'GET /orders' &&
+          inconsistentOrders.includes(error.category);
+        if (!row.hosted_checkout || row.provider_order || !incompatible || error.http < 200 || error.http >= 300) throw error;
+        orderError = error;
+      }
+      return row.hosted_checkout ? await refreshHostedCheckout(key, current, { orderError, signal }) : row;
     } catch (error) {
       if (!(error instanceof ProviderError || error instanceof HttpError)) throw error;
-      const updated = await setReconciliation(current, error.http ?? null, error.category ?? 'gateway_configuration');
+      const category = error.category ?? 'gateway_configuration';
+      const diagnostics = [orderError?.diagnostic, error.diagnostic ??
+        { operation: 'gateway', http: error.http ?? null, check: category }].filter(Boolean);
+      const updated = await setReconciliation(current, {
+        http: error.http ?? null, error: category, diagnostics,
+        blockCheckout: Boolean(orderError || error.diagnostic?.operation.startsWith('GET /orders'))
+      });
       if (background) return updated;
       throw error;
     }

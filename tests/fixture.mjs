@@ -38,7 +38,7 @@ export async function fixture({ browser = false, port = 0, originOverride, allow
   const remote = {
     calls: [], orders: new Map(), links: new Map(), hooks: new Map(), linkPosts: 0, sequence: 0, failing: false,
     nextLinkFault: '', respondToCreation: null, linkCodes: new Map(),
-    orderLookup: null, checkoutLookup: null, checkoutHost: 'payment-link.pagar.me',
+    orderLookup: null, checkoutLookup: null, checkoutDetails: null, checkoutHost: 'payment-link.pagar.me',
     complete(code, status = 'paid') {
       const link = [...this.links.values()].find(value => this.linkCodes.get(value.id) === code);
       if (!link || link.total_sessions !== 0) throw new Error('Checkout não está disponível para simular um pedido.');
@@ -108,7 +108,9 @@ export async function fixture({ browser = false, port = 0, originOverride, allow
       data: [...remote.links.values()].filter(link => !searchParams.has('name') || link.name === searchParams.get('name'))
     });
     if (route.startsWith('/paymentlinks/')) {
-      const link = remote.links.get(route.slice('/paymentlinks/'.length));
+      const id = route.slice('/paymentlinks/'.length);
+      if (remote.checkoutDetails) return remote.checkoutDetails(id);
+      const link = remote.links.get(id);
       return link ? output(link) : output({},404);
     }
     if (route.startsWith('/orders/')) return remote.orders.has(route.slice(8)) ? output(remote.orders.get(route.slice(8))) : output({},404);

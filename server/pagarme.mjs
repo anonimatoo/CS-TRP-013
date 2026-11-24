@@ -6,15 +6,26 @@ const checkoutHosts = new Set([
   'payment-link.stone.com.br'
 ]);
 
-export function hostedCheckoutUrl(value) {
-  if (typeof value !== 'string' || value.length > 2048) return null;
+export function inspectCheckoutUrl(value) {
+  if (value == null || value === '') return { reason: 'url_missing' };
+  if (typeof value !== 'string') return { reason: 'url_invalid_type' };
+  if (value.length > 2048) return { reason: 'url_too_long' };
+  let url;
   try {
-    const url = new URL(value);
-    return url.protocol === 'https:' && checkoutHosts.has(url.hostname) &&
-      !url.username && !url.password && !url.port ? url.href : null;
+    url = new URL(value);
   } catch {
-    return null;
+    return { reason: 'url_invalid_format' };
   }
+  const hostname = checkoutHosts.has(url.hostname) ? url.hostname : undefined;
+  if (url.protocol !== 'https:') return { reason: 'url_not_https', hostname };
+  if (url.username || url.password) return { reason: 'url_has_credentials', hostname };
+  if (url.port) return { reason: 'url_nondefault_port', hostname };
+  if (!hostname) return { reason: 'url_untrusted_host' };
+  return { url: url.href, hostname };
+}
+
+export function hostedCheckoutUrl(value) {
+  return inspectCheckoutUrl(value).url ?? null;
 }
 
 export const hostedCheckoutName = id => 'CS TRP 013 ' + id;
@@ -35,18 +46,20 @@ function transportCategory(error) {
 }
 
 export class ProviderError extends Error {
-  constructor(http, category) {
+  constructor(http, category, diagnostic) {
     super('A comunicação com a Pagar.me falhou.');
     this.http = http;
     this.category = category;
+    if (diagnostic) this.diagnostic = diagnostic;
   }
 }
 
 export function makePagarme(fetcher = fetch, { timeout = 8000 } = {}) {
-  return async function pagarme(key, path, { method = 'GET', body, idempotency } = {}) {
+  return async function pagarme(key, path, { method = 'GET', body, idempotency, signal: deadline } = {}) {
     const paymentLink = /^\/paymentlinks(?:[/?]|$)/.test(path);
     const base = paymentLink && key.startsWith('sk_test_') ? SANDBOX_PAYMENT_LINK_API : API;
-    const signal = AbortSignal.timeout(timeout);
+    const timeoutSignal = AbortSignal.timeout(timeout);
+    const signal = deadline ? AbortSignal.any([deadline, timeoutSignal]) : timeoutSignal;
     let response;
     try {
       response = await fetcher(base + path, {
