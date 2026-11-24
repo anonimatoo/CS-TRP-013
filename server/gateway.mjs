@@ -13,7 +13,7 @@ const configSchema = z.object({
 
 const context = (env, account) => env + ':' + account;
 export const gatewayRow = (db, env, lock = false) =>
-  one(db, 'SELECT * FROM cs_trp_013.gateway WHERE environment=$1' + (lock ? ' FOR UPDATE' : ''), [env]);
+  one(db, 'SELECT * FROM cs_trp_013_v2.gateway WHERE environment=$1' + (lock ? ' FOR UPDATE' : ''), [env]);
 export const gatewaySecret = (config, row) => decrypt(config.encryptionKey, row.secret, context(row.environment, row.account));
 const meta = row => ({
   environment: row.environment, account: row.account, mode: row.mode, publicKey: row.public_key,
@@ -67,7 +67,7 @@ export function makeGateway(db, config, pagarme) {
     if (Boolean(before.secret) !== (action === 'replace')) {
       throw new HttpError(409, before.secret ? 'Use Substituir chave SK.' : 'Use Adicionar chave.');
     }
-    const history = await one(db, `SELECT account, provider_order, id, status FROM cs_trp_013.orders
+    const history = await one(db, `SELECT account, provider_order, id, status FROM cs_trp_013_v2.orders
       WHERE environment=$1 ORDER BY (provider_order IS NOT NULL) DESC, (status <> 'request_failed') DESC, created_at DESC LIMIT 1`, [env]);
     if (history && history.account !== account) throw new HttpError(409, 'Este ambiente possui pedidos associados a outra conta comercial.');
     if (history && !history.provider_order && history.status !== 'request_failed') {
@@ -81,11 +81,11 @@ export function makeGateway(db, config, pagarme) {
     const sealed = encrypt(config.encryptionKey, secret, context(env, account));
     return db.tx(async client => {
       await checkVersion(client, before);
-      const currentHistory = await one(client, 'SELECT account FROM cs_trp_013.orders WHERE environment=$1 LIMIT 1', [env]);
+      const currentHistory = await one(client, 'SELECT account FROM cs_trp_013_v2.orders WHERE environment=$1 LIMIT 1', [env]);
       if ((!history && currentHistory) || (currentHistory && currentHistory.account !== account)) {
         throw new HttpError(409, 'Um pedido foi registrado durante a validação. Tente novamente.');
       }
-      const row = await one(client, `UPDATE cs_trp_013.gateway SET
+      const row = await one(client, `UPDATE cs_trp_013_v2.gateway SET
         account=$2,mode=$3,public_key=$4,secret=$5,last_ok=true,last_http=$6,last_message=$7,
         tested_at=now(),updated_at=now(),version=version+1 WHERE environment=$1 RETURNING *`,
       [env, account, mode, publicKey, sealed, checked.http, checked.message]);
@@ -100,7 +100,7 @@ export function makeGateway(db, config, pagarme) {
     const checked = await probe(gatewaySecret(config, before), before.mode, before.account);
     return db.tx(async client => {
       await checkVersion(client, before);
-      const row = await one(client, `UPDATE cs_trp_013.gateway SET
+      const row = await one(client, `UPDATE cs_trp_013_v2.gateway SET
         last_ok=$2,last_http=$3,last_message=$4,tested_at=now(),enabled=(enabled AND $2),version=version+1
         WHERE environment=$1 RETURNING *`, [env, checked.connected, checked.http, checked.message]);
       await audit(client, 'gateway.test', { environment: env, connected: checked.connected, http: checked.http });
@@ -120,10 +120,10 @@ export function makeGateway(db, config, pagarme) {
     return db.tx(async client => {
       await checkVersion(client, before);
       const row = action === 'disconnect'
-        ? await one(client, `UPDATE cs_trp_013.gateway SET
+        ? await one(client, `UPDATE cs_trp_013_v2.gateway SET
             secret=NULL,public_key=NULL,last_ok=NULL,last_http=NULL,last_message=NULL,tested_at=NULL,
             enabled=false,updated_at=now(),version=version+1 WHERE environment=$1 RETURNING *`, [env])
-        : await one(client, `UPDATE cs_trp_013.gateway SET
+        : await one(client, `UPDATE cs_trp_013_v2.gateway SET
             enabled=$2,updated_at=now(),version=version+1 WHERE environment=$1 RETURNING *`, [env, action === 'activate']);
       await audit(client, 'gateway.' + action, { environment: env, account: before.account });
       return meta(row);

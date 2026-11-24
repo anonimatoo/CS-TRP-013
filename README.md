@@ -27,7 +27,7 @@ npm run db:migrate
 npm run dev
 ```
 
-Confira o inventário antes de migrar. A migração usa o schema `cs_trp_013` e tem controle de versão, checksum e trava transacional. Ela não importa dados de tabelas legadas. Se o schema já existir com tabelas de outro sistema, revise o mapeamento antes de aplicar a primeira migração.
+Confira o inventário antes de migrar. A migração usa o schema `cs_trp_013_v2` e tem controle de versão, checksum e trava transacional. O schema separado permite usar o mesmo banco de uma instalação legada, inclusive quando já existem as tabelas de `cs_trp_013`. A versão nova inicia com seu próprio produto, configurações e histórico. Se `cs_trp_013_v2` já existir com tabelas de outra aplicação, revise o mapeamento antes da primeira migração.
 
 Abra [http://localhost:5173](http://localhost:5173). O Vite encaminha `/api` para o Express na porta 3001. Para mudar a porta, ajuste também o proxy local em `vite.config.ts`. Use o domínio HTTPS cadastrado na Pagar.me para testar a tokenização caso o provedor recuse a origem local. [Domínio na Pagar.me](https://docs.pagar.me/docs/configurando-a-dashboard-nuvemshop#configura%C3%A7%C3%A3o-de-dom%C3%ADnio)
 

@@ -22,10 +22,19 @@ export async function fixture({ browser = false, port = 0, originOverride } = {}
       ? client.exec(sql) : client.query(sql, args)
   });
   const db = { ...adapter(pg), tx: fn => pg.transaction(tx => fn(adapter(tx))) };
-  await pg.exec('CREATE TABLE public.anterior(id integer); INSERT INTO public.anterior VALUES(7);');
+  await pg.exec(`CREATE TABLE public.anterior(id integer);
+    INSERT INTO public.anterior VALUES(7);
+    CREATE SCHEMA cs_trp_013;
+    CREATE TABLE cs_trp_013.orders(id integer);
+    INSERT INTO cs_trp_013.orders VALUES(8);`);
   await migrate(db);
   await migrate(db);
-  if (!(await inspect(db)).some(row => row.table_name === 'anterior')) throw new Error('Tabela preexistente não preservada.');
+  const tables = await inspect(db);
+  const legacy = await db.query('SELECT id FROM cs_trp_013.orders');
+  if (!tables.some(row => row.table_schema === 'public' && row.table_name === 'anterior') ||
+      legacy.rows.length !== 1 || legacy.rows[0].id !== 8) {
+    throw new Error('Estrutura ou dados legados não preservados.');
+  }
   const remote = { calls: [], orders: new Map(), hooks: new Map(), chargePosts: 0, sequence: 0, failing: false };
   const output = (body, status = 200) => Response.json(body, { status });
   const pagarme = makePagarme(async (url, options) => {

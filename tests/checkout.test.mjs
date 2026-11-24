@@ -87,7 +87,7 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
     assert.equal((await keyAction('add', cfg('sk_invalid'))).status, 422);
     assert.equal((await keyAction('add', cfg(wrongKey))).json.http, 401);
     assert.equal((await keyAction('add', cfg(firstKey))).json.hasKey, true);
-    const raw = await app.db.query('SELECT secret FROM cs_trp_013.gateway WHERE environment=$1', ['test']);
+    const raw = await app.db.query('SELECT secret FROM cs_trp_013_v2.gateway WHERE environment=$1', ['test']);
     assert.notEqual(raw.rows[0].secret, firstKey);
     assert.equal((await keyAction('test')).json.http, 200);
     assert.equal((await keyAction('activate', { confirmed: false })).status, 422);
@@ -143,13 +143,13 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
     assert.equal((await post('/hooks/pagarme/' + hookSecret, event)).status, 204);
     assert.equal((await post('/hooks/pagarme/' + hookSecret, event)).status, 204);
     assert.equal((await req('/orders/' + uncertain.id)).json.status, 'paid');
-    assert.equal((await app.db.query('SELECT id FROM cs_trp_013.webhook_events')).rows.length, 1);
+    assert.equal((await app.db.query('SELECT id FROM cs_trp_013_v2.webhook_events')).rows.length, 1);
   });
 
   await t.test('substituição com rollback, chave nova em operação, captura e estorno', async () => {
-    const before = (await app.db.query('SELECT secret FROM cs_trp_013.gateway WHERE environment=$1', ['test'])).rows[0].secret;
+    const before = (await app.db.query('SELECT secret FROM cs_trp_013_v2.gateway WHERE environment=$1', ['test'])).rows[0].secret;
     assert.equal((await keyAction('replace', cfg(wrongKey))).status, 422);
-    assert.equal((await app.db.query('SELECT secret FROM cs_trp_013.gateway WHERE environment=$1', ['test'])).rows[0].secret, before);
+    assert.equal((await app.db.query('SELECT secret FROM cs_trp_013_v2.gateway WHERE environment=$1', ['test'])).rows[0].secret, before);
     assert.equal((await keyAction('replace', cfg(secondKey))).status, 200);
     assert.equal((await post('/orders', input(version))).json.safeToRetry, true);
     gatewayVersion = (await req('/checkout')).json.gatewayVersion;
@@ -213,6 +213,6 @@ test('PSP usa o token para criar cartão e envia apenas card_id no pedido', asyn
   assert.equal(typed[1].body.token, 'token_PspLocalDemo');
   assert.equal(typed[2].body.customer_id, 'cus_DemoCustomer');
   assert.deepEqual(typed[2].body.payments[0].credit_card, { card_id: 'card_DemoCard', installments: 1, operation_type: 'auth_and_capture' });
-  const persisted = JSON.stringify((await app.db.query('SELECT * FROM cs_trp_013.orders')).rows);
+  const persisted = JSON.stringify((await app.db.query('SELECT * FROM cs_trp_013_v2.orders')).rows);
   assert.ok(!persisted.includes('card_DemoCard') && !persisted.includes('token_PspLocalDemo') && !persisted.includes('52998224725'));
 });

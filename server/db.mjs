@@ -2,7 +2,9 @@ import pg from 'pg';
 
 export function makePool(connectionString) {
   if (!connectionString) throw new Error('DATABASE_URL não configurada.');
-  return new pg.Pool({ connectionString, max: 4, connectionTimeoutMillis: 4500, idleTimeoutMillis: 10000 });
+  return new pg.Pool({
+    connectionString, enableChannelBinding: true, max: 4, connectionTimeoutMillis: 4500, idleTimeoutMillis: 10000
+  });
 }
 
 export function createDatabase(pool) {
@@ -30,5 +32,5 @@ export async function one(db, sql, args) {
 }
 
 export async function audit(db, action, details = {}) {
-  await db.query('INSERT INTO cs_trp_013.audit (action,details) VALUES ($1,$2)', [action, JSON.stringify(details)]);
+  await db.query('INSERT INTO cs_trp_013_v2.audit (action,details) VALUES ($1,$2)', [action, JSON.stringify(details)]);
 }

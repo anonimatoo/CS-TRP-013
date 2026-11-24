@@ -127,11 +127,11 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
     if (amount === null || amount < config.min || amount > config.max) throw new HttpError(422, 'Informe um valor em reais dentro dos limites configurados.');
     if (form.maxInstallments > amount) throw new HttpError(422, 'Cada parcela precisa ter pelo menos um centavo.');
     const result = await db.tx(async client => {
-      const row = await one(client, `UPDATE cs_trp_013.product SET name=$1,description=$2,image=$3,amount=$4,
+      const row = await one(client, `UPDATE cs_trp_013_v2.product SET name=$1,description=$2,image=$3,amount=$4,
         max_installments=$5,enabled=$6,environment=$7,operation=$8,version=version+1
         WHERE id=1 RETURNING *`, [form.name,form.description,form.image,amount,form.maxInstallments,
         form.enabled,form.environment,form.operation]);
-      await client.query('INSERT INTO cs_trp_013.prices(version,amount) VALUES($1,$2)', [row.version, amount]);
+      await client.query('INSERT INTO cs_trp_013_v2.prices(version,amount) VALUES($1,$2)', [row.version, amount]);
       await audit(client, 'product.update', { version: row.version, amount, environment: form.environment });
       return safeShop(row);
     });
@@ -146,21 +146,21 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
       count(*) FILTER (WHERE status='declined')::int AS declined,
       count(*) FILTER (WHERE status IN ('pending','processing','review','authorized','communication_error'))::int AS pending,
       count(*) FILTER (WHERE status IN ('canceled','refunded'))::int AS canceled
-      FROM cs_trp_013.orders WHERE environment=$1`, [env]);
+      FROM cs_trp_013_v2.orders WHERE environment=$1`, [env]);
     res.json(row);
   });
 
   app.get('/api/admin/transactions/:env', async (req, res) => {
     const env = parse(environment, req.params.env, 'Ambiente inválido.');
     const page = parse(z.coerce.number().int().min(1).max(100000), req.query.page ?? 1, 'Página inválida.');
-    const { rows } = await db.query('SELECT * FROM cs_trp_013.orders WHERE environment=$1 ORDER BY created_at DESC,id LIMIT 51 OFFSET $2', [env, (page - 1) * 50]);
+    const { rows } = await db.query('SELECT * FROM cs_trp_013_v2.orders WHERE environment=$1 ORDER BY created_at DESC,id LIMIT 51 OFFSET $2', [env, (page - 1) * 50]);
     res.json({ rows: rows.slice(0, 50), hasNext: rows.length > 50 });
   });
 
   app.get('/api/admin/report/:env', async (req, res) => {
     const env = parse(environment, req.params.env, 'Ambiente inválido.');
     const { rows } = await db.query(`SELECT id,created_at,amount,installments,status,provider_order,provider_charge,
-      refusal_code,refusal_reason FROM cs_trp_013.orders WHERE environment=$1 ORDER BY created_at DESC LIMIT 10001`, [env]);
+      refusal_code,refusal_reason FROM cs_trp_013_v2.orders WHERE environment=$1 ORDER BY created_at DESC LIMIT 10001`, [env]);
     if (rows.length > 10000) throw new HttpError(422, 'O volume excede o limite de exportação de 10.000 registros.');
     const heading = ['Pedido','Data UTC','Valor centavos','Parcelas','Status','Pedido Pagar.me','Cobrança Pagar.me','Código','Motivo'];
     res.attachment('cs-trp-013-' + env + '.csv').type('text/csv').send('\uFEFF' + [heading, ...rows.map(Object.values)].map(row => row.map(csvCell).join(';')).join('\r\n'));
@@ -170,7 +170,7 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
     const id = parse(uuidParam, req.params.id, 'Referência inválida.');
     const row = await payments.get(id);
     if (!row) throw new HttpError(404, 'Pedido não encontrado.');
-    const { rows } = await db.query('SELECT * FROM cs_trp_013.transactions WHERE order_id=$1 ORDER BY id DESC', [id]);
+    const { rows } = await db.query('SELECT * FROM cs_trp_013_v2.transactions WHERE order_id=$1 ORDER BY id DESC', [id]);
     res.json({ row, events: rows });
   });
 

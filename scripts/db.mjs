@@ -16,17 +16,17 @@ export async function migrate(db) {
   const files = (await readdir(directory)).filter(name => /^\d+_.*\.sql$/.test(name)).sort();
   await db.tx(async client => {
     await client.query("SELECT pg_advisory_xact_lock(1967013)");
-    await client.query('CREATE SCHEMA IF NOT EXISTS cs_trp_013');
-    await client.query(`CREATE TABLE IF NOT EXISTS cs_trp_013.migrations
+    await client.query('CREATE SCHEMA IF NOT EXISTS cs_trp_013_v2');
+    await client.query(`CREATE TABLE IF NOT EXISTS cs_trp_013_v2.migrations
       (filename text PRIMARY KEY, digest text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
     for (const file of files) {
       const sql = await readFile(new URL(file, directory), 'utf8');
       const digest = createHash('sha256').update(sql.replace(/\r\n/g, '\n')).digest('hex');
-      const { rows: [prior] } = await client.query('SELECT digest FROM cs_trp_013.migrations WHERE filename=$1', [file]);
+      const { rows: [prior] } = await client.query('SELECT digest FROM cs_trp_013_v2.migrations WHERE filename=$1', [file]);
       if (prior && prior.digest !== digest) throw new Error('Migration anteriormente aplicada foi modificada: ' + file);
       if (prior) continue;
       await client.query(sql);
-      await client.query('INSERT INTO cs_trp_013.migrations(filename,digest) VALUES($1,$2)', [file, digest]);
+      await client.query('INSERT INTO cs_trp_013_v2.migrations(filename,digest) VALUES($1,$2)', [file, digest]);
     }
   });
 }
@@ -39,7 +39,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     console.table(await inspect(db));
     if (process.argv[2] === 'migrate') {
       await migrate(db);
-      console.log('Migrations aplicadas no schema cs_trp_013.');
+      console.log('Migrations aplicadas no schema cs_trp_013_v2.');
     }
   } finally {
     await pool.end();

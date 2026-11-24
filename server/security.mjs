@@ -64,7 +64,7 @@ export function makeSecurity(db, config) {
   function limit(bucket, max, seconds, global = false) {
     return async (req, _res, next) => {
       const id = identify(bucket + ':' + (global ? 'global' : req.ip));
-      const row = await one(db, `INSERT INTO cs_trp_013.rate_limits AS r (id,window_end,attempts)
+      const row = await one(db, `INSERT INTO cs_trp_013_v2.rate_limits AS r (id,window_end,attempts)
         VALUES ($1,now()+make_interval(secs => $2),1)
         ON CONFLICT (id) DO UPDATE SET
         attempts = CASE WHEN r.window_end <= now() THEN 1 ELSE r.attempts + 1 END,
@@ -79,7 +79,7 @@ export function makeSecurity(db, config) {
     const token = req.headers.cookie?.split(';').map(value => value.trim()).find(value => value.startsWith(cookie + '='))?.slice(cookie.length + 1);
     if (!token || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw new HttpError(401, 'Entre com a senha administrativa.');
     const id = identify(token);
-    const current = await one(db, 'SELECT id,csrf FROM cs_trp_013.sessions WHERE id=$1 AND expires_at>now()', [id]);
+    const current = await one(db, 'SELECT id,csrf FROM cs_trp_013_v2.sessions WHERE id=$1 AND expires_at>now()', [id]);
     if (!current) throw new HttpError(401, 'Sessão encerrada. Entre novamente.');
     req.admin = current;
     next();
@@ -96,12 +96,12 @@ export function makeSecurity(db, config) {
     }
     const token = secretToken();
     const csrfToken = secretToken();
-    await db.query("INSERT INTO cs_trp_013.sessions VALUES ($1,$2,now()+interval '4 hours')", [identify(token), csrfToken]);
+    await db.query("INSERT INTO cs_trp_013_v2.sessions VALUES ($1,$2,now()+interval '4 hours')", [identify(token), csrfToken]);
     res.cookie(cookie, token, { ...cookieOptions, maxAge: 14400000 }).json({ csrf: csrfToken });
   }
 
   async function logout(req, res) {
-    await db.query('DELETE FROM cs_trp_013.sessions WHERE id=$1', [req.admin.id]);
+    await db.query('DELETE FROM cs_trp_013_v2.sessions WHERE id=$1', [req.admin.id]);
     res.clearCookie(cookie, cookieOptions).json({ ok: true });
   }
 

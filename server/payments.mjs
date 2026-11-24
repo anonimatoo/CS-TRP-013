@@ -21,7 +21,7 @@ export const payment = z.object({
 }).strict();
 
 export const productRow = (db, lock = false) =>
-  one(db, 'SELECT * FROM cs_trp_013.product WHERE id=1' + (lock ? ' FOR UPDATE' : ''));
+  one(db, 'SELECT * FROM cs_trp_013_v2.product WHERE id=1' + (lock ? ' FOR UPDATE' : ''));
 
 export const publicOrder = row => ({
   id: row.id, status: row.status, amount: row.amount, installments: row.installments, environment: row.environment,
@@ -45,7 +45,7 @@ function billingDetails(buyer) {
 
 export function makePayments(db, config, pagarme) {
   const get = (id, connection = db, lock = false) =>
-    one(connection, 'SELECT * FROM cs_trp_013.orders WHERE id=$1' + (lock ? ' FOR UPDATE' : ''), [id]);
+    one(connection, 'SELECT * FROM cs_trp_013_v2.orders WHERE id=$1' + (lock ? ' FOR UPDATE' : ''), [id]);
 
   async function apply(client, id, providerOrder, snapshot, http) {
     const current = await get(id, client, true);
@@ -56,23 +56,23 @@ export function makePayments(db, config, pagarme) {
     if (current.provider_charge && snapshot.chargeId && current.provider_charge !== snapshot.chargeId) {
       throw new HttpError(409, 'A cobrança retornada não corresponde à cobrança local.');
     }
-    const row = await one(client, `UPDATE cs_trp_013.orders SET
+    const row = await one(client, `UPDATE cs_trp_013_v2.orders SET
       provider_order=COALESCE($2, provider_order),provider_charge=COALESCE($3, provider_charge),
       status=$4,http_status=$5,refusal_code=$6,refusal_reason=$7,provider_status=$8,
       provider_updated_at=COALESCE($9,provider_updated_at),actual_paid=COALESCE($10,actual_paid),updated_at=now()
       WHERE id=$1 RETURNING *`,
     [id, providerOrder, snapshot.chargeId, snapshot.status, http, snapshot.refusalCode,
       snapshot.refusalReason, snapshot.providerStatus, snapshot.updatedAt, snapshot.paid]);
-    const latest = await one(client, `SELECT provider_id,status FROM cs_trp_013.transactions
+    const latest = await one(client, `SELECT provider_id,status FROM cs_trp_013_v2.transactions
       WHERE order_id=$1 ORDER BY id DESC LIMIT 1`, [id]);
     if (latest?.status !== row.status || latest?.provider_id !== snapshot.transactionId) {
-      await client.query('INSERT INTO cs_trp_013.transactions(order_id,provider_id,status) VALUES ($1,$2,$3)',
+      await client.query('INSERT INTO cs_trp_013_v2.transactions(order_id,provider_id,status) VALUES ($1,$2,$3)',
         [id, snapshot.transactionId, row.status]);
     }
-    const action = await one(client, 'SELECT action FROM cs_trp_013.payment_actions WHERE order_id=$1', [id]);
+    const action = await one(client, 'SELECT action FROM cs_trp_013_v2.payment_actions WHERE order_id=$1', [id]);
     const completed = action?.action === 'capture' ? ['paid','captured'] : ['canceled','refunded','chargedback'];
     if (action && completed.includes(row.status)) {
-      await client.query('DELETE FROM cs_trp_013.payment_actions WHERE order_id=$1', [id]);
+      await client.query('DELETE FROM cs_trp_013_v2.payment_actions WHERE order_id=$1', [id]);
     }
     return row;
   }
@@ -93,7 +93,7 @@ export function makePayments(db, config, pagarme) {
       if (input.installments > Math.min(product.max_installments, product.amount)) {
         throw new HttpError(422, 'O parcelamento selecionado não está disponível.', { safeToRetry: true });
       }
-      const row = await one(client, `INSERT INTO cs_trp_013.orders
+      const row = await one(client, `INSERT INTO cs_trp_013_v2.orders
         (id,environment,account,price_version,amount,installments,product_name,status)
         VALUES ($1,$2,$3,$4,$5,$6,$7,'processing') ON CONFLICT DO NOTHING RETURNING *`,
       [input.id, gateway.environment, gateway.account, product.version, product.amount, input.installments, product.name]);
@@ -140,7 +140,7 @@ export function makePayments(db, config, pagarme) {
       if (!(error instanceof ProviderError)) throw error;
       const confirmedFailure = !sentOrder || [400,401,403,422].includes(error.http);
       const status = confirmedFailure ? 'request_failed' : 'communication_error';
-      return await one(db, `UPDATE cs_trp_013.orders SET status=$2,http_status=$3,updated_at=now()
+      return await one(db, `UPDATE cs_trp_013_v2.orders SET status=$2,http_status=$3,updated_at=now()
         WHERE id=$1 AND provider_order IS NULL RETURNING *`, [row.id, status, error.http]) ?? await get(row.id);
     }
   }
@@ -185,10 +185,10 @@ export function makePayments(db, config, pagarme) {
     const operation = await db.tx(async client => {
       const current = await get(row.id, client, true);
       if (!statuses.includes(current.status)) throw new HttpError(409, 'O estado da cobrança mudou.');
-      const pending = await one(client, 'SELECT action FROM cs_trp_013.payment_actions WHERE order_id=$1 LIMIT 1', [row.id]);
+      const pending = await one(client, 'SELECT action FROM cs_trp_013_v2.payment_actions WHERE order_id=$1 LIMIT 1', [row.id]);
       if (pending) throw new HttpError(409, 'Há uma operação já enviada. Atualize a cobrança e concilie no painel da Pagar.me.');
       const requestId = randomUUID();
-      await client.query('INSERT INTO cs_trp_013.payment_actions(order_id,action,request_id) VALUES ($1,$2,$3)', [row.id, action, requestId]);
+      await client.query('INSERT INTO cs_trp_013_v2.payment_actions(order_id,action,request_id) VALUES ($1,$2,$3)', [row.id, action, requestId]);
       await audit(client, 'payments.' + action, { id: row.id });
       return requestId;
     });
@@ -210,10 +210,10 @@ export function makePayments(db, config, pagarme) {
     const localId = isOrder ? event.data?.code : event.data?.order?.code;
     const lookup = z.uuid().safeParse(localId);
     if (!remoteId) return;
-    let row = await one(db, `SELECT * FROM cs_trp_013.orders WHERE ${isOrder ? 'provider_order' : 'provider_charge'}=$1`, [remoteId]);
+    let row = await one(db, `SELECT * FROM cs_trp_013_v2.orders WHERE ${isOrder ? 'provider_order' : 'provider_charge'}=$1`, [remoteId]);
     if (!row && lookup.success) row = await get(lookup.data);
     if (!row || row.account !== event.account?.id) return;
-    if (await one(db, 'SELECT id FROM cs_trp_013.webhook_events WHERE id=$1', [eventId])) return;
+    if (await one(db, 'SELECT id FROM cs_trp_013_v2.webhook_events WHERE id=$1', [eventId])) return;
     const key = await keyFor(row);
     const auth = await pagarme(key, '/hooks/' + eventId);
     const verified = auth.data;
@@ -225,7 +225,7 @@ export function makePayments(db, config, pagarme) {
     if (!result.provider_order || (isOrder ? result.provider_order !== remoteId : result.provider_charge !== remoteId)) {
       throw new HttpError(409, 'O pedido ainda não está disponível para conciliação.');
     }
-    await db.query(`INSERT INTO cs_trp_013.webhook_events(id,type,order_id) VALUES ($1,$2,$3)
+    await db.query(`INSERT INTO cs_trp_013_v2.webhook_events(id,type,order_id) VALUES ($1,$2,$3)
       ON CONFLICT DO NOTHING`, [eventId, kind, row.id]);
   }
 
