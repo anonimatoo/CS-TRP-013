@@ -100,13 +100,22 @@ try {
       body: '<h1>Pagar.me (provedor de teste)</h1><a href="' + app.origin + '/?pedido=' + app.remote.linkCodes.get(link.id) + '">Voltar à loja</a>'
     });
   });
-  await page.getByRole('button', { name: 'FINALIZAR PAGAMENTO' }).click();
+  const finalizePayment = page.getByRole('button', { name: 'FINALIZAR PAGAMENTO' });
+  await finalizePayment.click();
   await page.waitForURL(stoneCheckout);
   await page.getByRole('heading', { name: 'Pagar.me (provedor de teste)' }).waitFor();
   assert.equal(page.context().pages().length, 1);
   assert.equal(app.remote.linkPosts, 1);
   const link = [...app.remote.links.values()][0];
+  await page.getByRole('link', { name: 'Voltar à loja' }).click();
+  const continuePayment = page.getByRole('link', { name: 'CONTINUAR NA PAGAR.ME' });
+  await continuePayment.waitFor();
+  assert.equal(await finalizePayment.count(), 0);
+  await continuePayment.click();
+  await page.waitForURL(stoneCheckout);
+  assert.equal(app.remote.linkPosts, 1);
   app.remote.complete(app.remote.linkCodes.get(link.id));
+  await app.db.query('UPDATE cs_trp_013_v2.orders SET checkout_synced_at=NULL WHERE id=$1', [app.remote.linkCodes.get(link.id)]);
   await page.getByRole('link', { name: 'Voltar à loja' }).click();
   await page.getByText('Pagamento aprovado', { exact: true }).waitFor();
   assert.ok(!ownRequests.some(body => body.includes('"token"') || body.includes('"cvv"') || body.includes('"holder_name"')));
@@ -116,6 +125,7 @@ try {
   await page.reload();
   await page.getByText('Pagamento aprovado', { exact: true }).waitFor();
   await page.getByRole('button', { name: 'Nova compra' }).click();
+  assert.equal(await finalizePayment.isEnabled(), true);
   await fillBuyer();
   app.remote.respondToCreation = ({ link, persist }) => {
     persist();
@@ -123,15 +133,15 @@ try {
   };
   app.remote.orderLookup = () => Response.json({ data: null });
   app.remote.checkoutDetails = () => Response.json({}, { status: 503 });
-  await page.getByRole('button', { name: 'FINALIZAR PAGAMENTO' }).click();
+  await finalizePayment.click();
   await page.getByText('Falha ao confirmar o checkout', { exact: true }).waitFor();
   await page.getByText('Conciliação pendente com a Pagar.me.').waitFor();
   const pendingReference = new URL(page.url()).searchParams.get('pedido');
   assert.ok(pendingReference);
-  assert.equal(await page.getByRole('link', { name: 'CONTINUAR NA PAGAR.ME' }).count(), 0);
+  assert.equal(await continuePayment.count(), 0);
   app.remote.checkoutDetails = null;
   await app.db.query('UPDATE cs_trp_013_v2.orders SET checkout_synced_at=NULL WHERE id=$1', [pendingReference]);
-  await page.getByRole('link', { name: 'CONTINUAR NA PAGAR.ME' }).click();
+  await continuePayment.click();
   await page.waitForURL(stoneCheckout);
   assert.equal(app.remote.linkPosts, 2);
   assert.equal(page.context().pages().length, 1);
@@ -152,7 +162,7 @@ try {
   await modal.getByText('Chave não cadastrada').waitFor();
   await modal.getByRole('button', { name: 'SAIR' }).click();
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
-  assert.equal(await page.getByRole('button', { name: 'FINALIZAR PAGAMENTO' }).isDisabled(), true);
+  assert.equal(await finalizePayment.isDisabled(), true);
 
   for (const width of [1448, 768, 390, 320]) {
     await page.setViewportSize({ width, height: 890 });

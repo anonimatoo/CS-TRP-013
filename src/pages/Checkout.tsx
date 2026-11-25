@@ -262,9 +262,9 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
                 }}>CONTINUAR NA PAGAR.ME</a></>}
               {receipt?.newPurchaseAllowed && <button type="button" className="button secondary" onClick={newPurchase}>Nova compra</button>}
             </div>}
-            <button className="button primary purchase" type="submit" disabled={busy || (saved && !missing) || !shop.ready}>
+            {(!saved || missing || busy) && <button className="button primary purchase" type="submit" disabled={busy || !shop.ready}>
               {busy ? <Loader /> : <LockKeyhole size={20} />} {busy ? 'CRIANDO CHECKOUT' : missing ? 'TENTAR COM A MESMA REFERÊNCIA' : 'FINALIZAR PAGAMENTO'}
-            </button>
+            </button>}
           </section>
         </form>
         <aside className="panel order-panel" aria-label="Resumo do pedido">
