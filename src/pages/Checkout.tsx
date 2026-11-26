@@ -155,10 +155,12 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
     if (!validCpf(buyer.cpf)) { setError('Informe um CPF válido.'); return; }
     if (!/^[1-9][0-9]9\d{8}$/.test(digits(buyer.phone))) { setError('Informe um celular com DDD.'); return; }
     if (digits(buyer.cep).length !== 8) { setError('Informe um CEP com 8 dígitos.'); return; }
-    const form = new FormData(event.currentTarget);
+    const secureFields = cardFields.current;
+    if (!secureFields) return;
+    const cardField = (field: string) => secureFields.querySelector<HTMLInputElement>('[data-card-field="' + field + '"]')?.value ?? '';
     const card = {
-      number: digits(String(form.get('card-number'))), holder_name: String(form.get('card-name')).trim(),
-      exp_month: Number(form.get('card-month')), exp_year: Number(form.get('card-year')), cvv: String(form.get('card-cvv'))
+      number: digits(cardField('number')), holder_name: cardField('name').trim(),
+      exp_month: Number(cardField('month')), exp_year: Number(cardField('year')), cvv: cardField('cvv')
     };
     const now = new Date();
     if (card.number.length < 13 || card.number.length > 19 || !card.holder_name ||
@@ -167,7 +169,7 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
       setError('Confira os dados e a validade do cartão.');
       return;
     }
-    for (const input of cardFields.current?.querySelectorAll('input') ?? []) input.value = '';
+    for (const input of secureFields.querySelectorAll('input')) input.value = '';
     inFlight.current = true;
     setBusy(true);
     let id = '';
@@ -277,11 +279,11 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
             </select></label> : shop.methods?.debit_card && <p>À vista · {brl(shop.amount!)}</p>}
             <fieldset ref={cardFields} className="card-entry fields two" disabled={!shop.ready || busy || (saved && !missing)}>
               <legend>Dados do cartão</legend>
-              <Field label="Número do cartão" name="card-number" inputMode="numeric" autoComplete="cc-number" maxLength={24} required />
-              <Field label="Nome impresso no cartão" name="card-name" autoComplete="cc-name" maxLength={64} required />
-              <Field label="Mês (MM)" name="card-month" inputMode="numeric" autoComplete="cc-exp-month" pattern="[0-9]{1,2}" maxLength={2} required />
-              <Field label="Ano (AAAA)" name="card-year" inputMode="numeric" autoComplete="cc-exp-year" pattern="[0-9]{4}" maxLength={4} required />
-              <Field label="Código de segurança do cartão (CVV)" name="card-cvv" type="password" inputMode="numeric" autoComplete="off" pattern="[0-9]{3,4}" maxLength={4} required />
+              <Field label="Número do cartão" data-card-field="number" inputMode="numeric" autoComplete="cc-number" maxLength={24} required />
+              <Field label="Nome impresso no cartão" data-card-field="name" autoComplete="cc-name" maxLength={64} required />
+              <Field label="Mês (MM)" data-card-field="month" inputMode="numeric" autoComplete="cc-exp-month" pattern="[0-9]{1,2}" maxLength={2} required />
+              <Field label="Ano (AAAA)" data-card-field="year" inputMode="numeric" autoComplete="cc-exp-year" pattern="[0-9]{4}" maxLength={4} required />
+              <Field label="Código de segurança do cartão (CVV)" data-card-field="cvv" type="password" inputMode="numeric" autoComplete="off" pattern="[0-9]{3,4}" maxLength={4} required />
             </fieldset>
             <div ref={methodContainer} className="card-authentication-method" />
             <div ref={challengeContainer} className="card-authentication-challenge" />

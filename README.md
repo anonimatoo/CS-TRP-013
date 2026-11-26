@@ -16,7 +16,7 @@ powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\scripts\setup.ps1
 notepad .env.local
 ```
 
-Enquanto a implementação estiver em pull request, execute também `git switch codex/cs-trp-013-checkout` após entrar no diretório e antes de instalar.
+Enquanto a implementação estiver em pull request, execute também `git switch codex/cs-trp-013-cartoes` após entrar no diretório e antes de instalar.
 
 Preencha `DATABASE_URL` com a conexão do Neon e `ADMIN_PASSWORD` com uma senha exclusiva e forte, de pelo menos 12 caracteres. O script gera os outros três segredos. Se houver um arquivo local, o script o preserva. A opção `-RefreshTemplate` copia a configuração atual e o modelo novo para `backups/` para comparação. Proteja essa pasta como um arquivo de credenciais.
 
@@ -35,7 +35,7 @@ Na pasta já clonada, interrompa a instância local e guarde uma cópia segura d
 
 ```powershell
 git fetch origin
-git switch codex/cs-trp-013-checkout
+git switch codex/cs-trp-013-cartoes
 git pull --ff-only
 npm ci
 npm run db:migrate
@@ -64,7 +64,7 @@ Por ambiente, a aplicação associa pedidos à conta comercial. Uma credencial s
 
 ## Vercel e Neon
 
-Importe o repositório como projeto Vite na Vercel. Use a versão suportada do Node selecionada no projeto. O arquivo `vercel.json` define a build e encaminha as rotas de API, inclusive as aninhadas, à função Express. A branch `codex/cs-trp-013-checkout` tem deploy automático por Git desativado. Use a CLI da Vercel com o projeto de homologação para produzir uma prévia. Após homologação e autorização do responsável, publique a produção de forma explícita. [Deploy pela branch](https://vercel.com/docs/git)
+Importe o repositório como projeto Vite na Vercel. Use a versão suportada do Node selecionada no projeto. O arquivo `vercel.json` define a build e encaminha as rotas de API, inclusive as aninhadas, à função Express. A branch `codex/cs-trp-013-cartoes` tem deploy automático por Git desativado. Use a CLI da Vercel com o projeto de homologação para produzir uma prévia. Após homologação e autorização do responsável, publique a produção de forma explícita. [Deploy pela branch](https://vercel.com/docs/git)
 
 | Variável | Configuração |
 | --- | --- |
