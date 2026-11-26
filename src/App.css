@@ -236,3 +236,14 @@ th { background: #e8f0fb; }
   .admin-fields.two, .dashboard { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+
+.card-methods, .card-entry { border: 0; min-width: 0; padding: 0; margin: 0 0 18px; }
+.card-methods legend, .card-entry legend { font-weight: 700; margin-bottom: 10px; }
+.card-methods { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.card-methods label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; border: 1px solid #cbd5e1; border-radius: 8px; padding: 12px; }
+.card-methods label:has(:checked) { border-color: #2563eb; }
+.card-methods label:has(:disabled) { color: #64748b; }
+.card-methods small { display: block; flex-basis: 100%; }
+.card-authentication-method { display: none; }
+.card-authentication-challenge iframe { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; background: white; z-index: 1000; }
+.card-settings { display: grid; gap: 12px; margin: 20px 0; }

@@ -1,8 +1,9 @@
+import { cardAvailability, cardMethod, requires3ds, stoneToken } from './cards.mjs';
 import express from 'express';
 import helmet from 'helmet';
 import { z } from 'zod';
 import { audit, one } from './db.mjs';
-import { environment, gatewayRow, makeGateway } from './gateway.mjs';
+import { environment, gatewayRow, gatewaySecret, makeGateway } from './gateway.mjs';
 import { makePagarme, ProviderError } from './pagarme.mjs';
 import { makePayments, payment, productRow, publicOrder } from './payments.mjs';
 import { equalSecret, HttpError, makeSecurity } from './security.mjs';
@@ -10,8 +11,9 @@ import { parseBrl, states } from '../shared/validation.mjs';
 
 export const policy = {
   defaultSrc: ["'none'"], baseUri: ["'none'"], objectSrc: ["'none'"], frameAncestors: ["'none'"],
-  scriptSrc: ["'self'"], styleSrc: ["'self'"], imgSrc: ["'self'", 'https:'],
-  connectSrc: ["'self'"], fontSrc: ["'self'"], formAction: ["'none'"]
+  scriptSrc: ["'self'", "https://3ds-nx-js.stone.com.br"], styleSrc: ["'self'"], imgSrc: ["'self'", 'https:'],
+  connectSrc: ["'self'", 'https://api.pagar.me', 'https://3ds.stone.com.br', 'https://3ds-sdx.stone.com.br'],
+  frameSrc: ['https:'], fontSrc: ["'self'"], formAction: ["https:"]
 };
 
 const shopForm = z.object({
@@ -45,7 +47,7 @@ function adminOrder({ checkout_url, ...row }) {
   return { ...row, has_checkout_url: Boolean(checkout_url) };
 }
 
-export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetch }) {
+export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetch, stoneFetch = fetch }) {
   const app = express();
   app.disable('x-powered-by');
   if (config.production) app.set('trust proxy', 1);
@@ -57,7 +59,7 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
   app.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
   app.use(express.json({ limit: '128kb' }));
   const security = makeSecurity(db, config);
-  const gateway = makeGateway(db, config, pagarme);
+  const gateway = makeGateway(db, config, pagarme, stoneFetch);
   const payments = makePayments(db, config, pagarme);
 
   app.get('/api/checkout', async (_req, res) => {
@@ -65,7 +67,11 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
     const current = await gatewayRow(db, product.environment);
     const ready = Boolean(product.enabled && product.amount && current.enabled && current.last_ok && current.secret &&
       (current.environment !== 'live' || config.allowLive));
-    res.json({ ...safeShop(product), ready, gatewayVersion: current.version });
+    const methods = cardAvailability(current, config);
+    res.json({ ...safeShop(product), ready: ready && Object.values(methods).some(Boolean),
+      methods: ready ? methods : { credit_card: false, debit_card: false },
+      publicKey: ready ? current.public_key : null, gatewayVersion: current.version,
+      requires3ds: { credit_card: current.credit_requires_3ds, debit_card: current.debit_requires_3ds } });
   });
 
   app.get('/api/cep/:cep', security.limit('cep', 60, 60), async (req, res) => {
@@ -84,6 +90,19 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
       street: String(data.logradouro ?? ''), neighborhood: String(data.bairro ?? ''),
       city: String(data.localidade ?? ''), state: states.includes(data.uf) ? data.uf : ''
     });
+  });
+
+  app.post('/api/checkout/3ds', security.origin, security.limit('checkout-3ds', 12, 120), async (req, res) => {
+    const input = parse(z.object({ method: cardMethod, gatewayVersion: z.number().int(), version: z.number().int() }).strict(),
+      req.body, 'Dados inválidos para autenticação.');
+    const product = await productRow(db);
+    const row = await gatewayRow(db, product.environment);
+    if (!product.enabled || !product.amount || !row.enabled || !row.last_ok || !row.secret ||
+        (row.environment === 'live' && !config.allowLive) || !cardAvailability(row, config)[input.method] ||
+        !requires3ds(row, input.method) || input.version !== product.version || input.gatewayVersion !== row.version) {
+      throw new HttpError(409, 'A autenticação não está disponível para este checkout.', { safeToRetry: true });
+    }
+    res.json({ token: await stoneToken(gatewaySecret(config, row), row.environment, stoneFetch) });
   });
 
   app.post('/api/orders', security.origin, security.limit('checkout', 12, 120), async (req, res) => {
@@ -117,8 +136,9 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
   });
   app.post('/api/admin/gateway/:env/:action', security.limit('gateway', 25, 60), async (req, res) => {
     const env = parse(environment, req.params.env, 'Ambiente inválido.');
-    const action = parse(z.enum(['add','replace','test','activate','disable','disconnect']), req.params.action, 'Ação inválida.');
+    const action = parse(z.enum(['add','replace','test','activate','disable','disconnect','cards']), req.params.action, 'Ação inválida.');
     if (action === 'add' || action === 'replace') return res.json(await gateway.save(env, action, req.body));
+    if (action === 'cards') return res.json(await gateway.configure(env, req.body));
     if (action === 'test') return res.json(await gateway.test(env));
     res.json(await gateway.change(env, action, req.body));
   });
@@ -164,9 +184,9 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
   app.get('/api/admin/report/:env', async (req, res) => {
     const env = parse(environment, req.params.env, 'Ambiente inválido.');
     const { rows } = await db.query(`SELECT id,created_at,amount,installments,status,checkout_provider_id,provider_order,provider_charge,
-      refusal_code,refusal_reason FROM cs_trp_013_v2.orders WHERE environment=$1 ORDER BY created_at DESC LIMIT 10001`, [env]);
+      refusal_code,refusal_reason,payment_method,authorized_amount,provider_transaction,authentication_status FROM cs_trp_013_v2.orders WHERE environment=$1 ORDER BY created_at DESC LIMIT 10001`, [env]);
     if (rows.length > 10000) throw new HttpError(422, 'O volume excede o limite de exportação de 10.000 registros.');
-    const heading = ['Pedido','Data UTC','Valor centavos','Parcelas','Status','Checkout Pagar.me','Pedido Pagar.me','Cobrança Pagar.me','Código','Motivo'];
+    const heading = ['Pedido','Data UTC','Valor centavos','Parcelas','Status','Checkout Pagar.me','Pedido Pagar.me','Cobrança Pagar.me','Código','Motivo','Modalidade','Autorizado em centavos','Transação Pagar.me','Autenticação'];
     res.attachment('cs-trp-013-' + env + '.csv').type('text/csv').send('\uFEFF' + [heading, ...rows.map(Object.values)].map(row => row.map(csvCell).join(';')).join('\r\n'));
   });
 

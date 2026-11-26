@@ -1,3 +1,4 @@
+import { cardAvailability, cardMethod, requires3ds } from './cards.mjs';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { digits, validCpf, states } from '../shared/validation.mjs';
@@ -9,6 +10,10 @@ import { HttpError } from './security.mjs';
 const required = (max) => z.string().trim().min(1).max(max).refine(value => !/[\u0000-\u001f\u007f]/.test(value));
 export const payment = z.object({
   id: z.uuid(), version: z.number().int().positive(), gatewayVersion: z.number().int().nonnegative(), installments: z.number().int().min(1).max(24),
+  method: cardMethod,
+  cardToken: z.string().regex(/^token_[A-Za-z0-9_-]{4,120}$/).optional(),
+  authentication: z.object({ status: z.enum(['Y','A','N','C','U','R','I','canceled','unavailable']),
+    transactionId: z.uuid().optional() }).strict().optional(),
   buyer: z.object({
     name: required(64).refine(name => name.split(/\s+/).length >= 2).transform(name => name.toLocaleUpperCase('pt-BR')),
     cpf: z.string().max(14).refine(validCpf).transform(digits),
@@ -97,12 +102,12 @@ export function publicOrder(row) {
     (row.reconciliation_state == null || ['checkout_found','checkout_found_order_unverified'].includes(row.reconciliation_state)) &&
     Date.parse(row.checkout_expires_at) > Date.now() ? hostedCheckoutUrl(row.checkout_url) : null;
   return {
-    id: row.id, status: row.status, amount: row.amount, installments: row.installments, environment: row.environment,
+    id: row.id, method: row.payment_method, authenticationStatus: row.authentication_status, status: row.status, amount: row.amount, installments: row.installments, environment: row.environment,
     http: row.http_status, refusalCode: row.refusal_code, providerStatus: row.provider_status, checkoutUrl,
     checkoutError: row.checkout_error ?? null,
     reconciliation: row.reconciliation_state ?? (row.status === 'communication_error' ? 'pending' : null),
     checkoutExpiresAt: row.checkout_expires_at ?? null,
-    newPurchaseAllowed: (row.status === 'request_failed' && row.reconciliation_state === 'rejected') ||
+    newPurchaseAllowed: row.status === 'authentication_incomplete' || (row.status === 'request_failed' && row.reconciliation_state === 'rejected') ||
       row.reconciliation_state === 'closed_without_order' ||
       (row.reconciliation_state == null && Boolean(row.checkout_provider_id) && ['expired','canceled'].includes(row.status)) ||
       (Boolean(row.provider_order || row.provider_charge) && financialEnd.includes(row.status))
@@ -193,16 +198,19 @@ export function makePayments(db, config, pagarme) {
       provider_order=COALESCE($2, provider_order),provider_charge=COALESCE($3, provider_charge),
       status=$4,http_status=$5,refusal_code=$6,refusal_reason=$7,provider_status=$8,
       provider_updated_at=COALESCE($9,provider_updated_at),actual_paid=COALESCE($10,actual_paid),
+      authorized_amount=COALESCE($11,authorized_amount),provider_transaction=COALESCE($12,provider_transaction),
       reconciliation_state=CASE WHEN hosted_checkout THEN 'order_found' ELSE reconciliation_state END,
       reconciliation_error=NULL,reconciliation_http=$5,reconciliation_diagnostics=NULL,reconciliation_at=now(),updated_at=now()
       WHERE id=$1 RETURNING *`,
     [id, providerOrder, snapshot.chargeId, snapshot.status, http, snapshot.refusalCode,
-      snapshot.refusalReason, snapshot.providerStatus, snapshot.updatedAt, snapshot.paid]);
+      snapshot.refusalReason, snapshot.providerStatus, snapshot.updatedAt, snapshot.paid, snapshot.authorized, snapshot.transactionId]);
     const latest = await one(client, `SELECT provider_id,status FROM cs_trp_013_v2.transactions
       WHERE order_id=$1 ORDER BY id DESC LIMIT 1`, [id]);
     if (latest?.status !== row.status || latest?.provider_id !== snapshot.transactionId) {
-      await client.query('INSERT INTO cs_trp_013_v2.transactions(order_id,provider_id,status) VALUES ($1,$2,$3)',
-        [id, snapshot.transactionId, row.status]);
+      await client.query(`INSERT INTO cs_trp_013_v2.transactions(order_id,provider_id,status,payment_method,authorized_amount,
+        authentication_status,refusal_code,refusal_reason) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [id, snapshot.transactionId, row.status, row.payment_method, row.authorized_amount,
+          row.authentication_status, row.refusal_code, row.refusal_reason]);
     }
     const action = await one(client, 'SELECT action FROM cs_trp_013_v2.payment_actions WHERE order_id=$1', [id]);
     const completed = action?.action === 'capture' ? ['paid','captured'] : ['canceled','refunded','chargedback'];
@@ -227,13 +235,31 @@ export function makePayments(db, config, pagarme) {
       if (input.version !== product.version || input.gatewayVersion !== gateway.version) {
         throw new HttpError(409, 'O lojista atualizou o checkout. Revise o valor e tente novamente.', { safeToRetry: true });
       }
+      if (!cardAvailability(gateway, config)[input.method]) throw new HttpError(409, 'Modalidade indisponível.', { safeToRetry: true });
+      const needs3ds = requires3ds(gateway, input.method);
+      const authenticated = input.authentication?.status === 'Y' && Boolean(input.authentication.transactionId);
+      const incomplete = needs3ds && !authenticated;
+      if ((!needs3ds && input.authentication) || (needs3ds && !input.authentication) ||
+          (!incomplete && !input.cardToken) || (incomplete && input.cardToken)) {
+        throw new HttpError(422, 'Dados de autenticação ou token inválidos.', { safeToRetry: true });
+      }
+      if (input.method === 'debit_card' && input.installments !== 1) {
+        throw new HttpError(422, 'O débito deve ser pago à vista.', { safeToRetry: true });
+      }
       if (input.installments > Math.min(product.max_installments, product.amount)) {
         throw new HttpError(422, 'O parcelamento selecionado não está disponível.', { safeToRetry: true });
       }
       const row = await one(client, `INSERT INTO cs_trp_013_v2.orders
-        (id,environment,account,price_version,amount,installments,product_name,status,hosted_checkout,checkout_attempted_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,'processing',true,now()) ON CONFLICT DO NOTHING RETURNING *`,
-      [input.id, gateway.environment, gateway.account, product.version, product.amount, input.installments, product.name]);
+        (id,environment,account,price_version,amount,installments,product_name,status,payment_method,authentication_status,checkout_attempted_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now()) ON CONFLICT DO NOTHING RETURNING *`,
+      [input.id, gateway.environment, gateway.account, product.version, product.amount, input.installments, product.name,
+        incomplete ? 'authentication_incomplete' : 'processing', input.method,
+        needs3ds ? input.authentication.status : null]);
+      if (row && incomplete) {
+        await client.query(`INSERT INTO cs_trp_013_v2.transactions(order_id,status,payment_method,authentication_status)
+          VALUES ($1,$2,$3,$4)`, [row.id, row.status, row.payment_method, row.authentication_status]);
+        return { row };
+      }
       return row ? { row, product, gateway } : { row: await get(input.id, client) };
     });
   }
@@ -297,7 +323,7 @@ export function makePayments(db, config, pagarme) {
       return await storeCheckout(linked, result, { operation, creationHttp, orderError });
     } catch (error) {
       if (!(error instanceof ProviderError) || !correlatedCheckoutId(linked, result.data) ||
-          !['checkout_incomplete', 'checkout_url_missing'].includes(error.category) || operation !== 'POST /paymentlinks') throw error;
+          !['checkout_incomplete', 'checkout_url_missing'].includes(error.category) || operation !== 'POST /orders') throw error;
       const detail = await providerRead('GET /paymentlinks/{id}', key, '/paymentlinks/' + linked.checkout_provider_id, signal);
       return storeCheckout(linked, detail, { operation: 'GET /paymentlinks/{id}', creationHttp, orderError });
     }
@@ -318,31 +344,28 @@ export function makePayments(db, config, pagarme) {
     let http = null;
     try {
       const key = paymentSecret(gateway);
-      const returnUrl = new URL(config.origin);
-      returnUrl.searchParams.set('pedido', row.id);
-      const result = await pagarme(key, '/paymentlinks', { method: 'POST', idempotency: row.id, body: {
-        type: 'order', is_building: false, name: hostedCheckoutName(row.id), order_code: row.id,
-        max_sessions: 1, max_paid_sessions: 1, expires_in: checkoutMinutes,
-        cart_settings: { items: [{ name: row.product_name, amount: row.amount, default_quantity: 1 }] },
-        customer_settings: { customer: billingDetails(input.buyer) },
-        payment_settings: {
-          accepted_payment_methods: ['credit_card'],
-          credit_card_settings: {
-            operation_type: product.operation,
-            installments: [{ number: row.installments, total: row.amount }]
-          }
-        },
-        ...(returnUrl.protocol === 'https:' ? { flow_settings: { success_url: returnUrl.href } } : {})
+      const customer = billingDetails(input.buyer);
+      const card = {
+        card_token: input.cardToken, card: { billing_address: customer.address },
+        ...(input.method === 'credit_card' ? { installments: row.installments, operation_type: product.operation } : {}),
+        ...(requires3ds(gateway, input.method) ? {
+          authentication: { type: 'threed_secure', threed_secure: {
+            mpi: 'pagarme', transaction_id: input.authentication.transactionId
+          } }
+        } : {})
+      };
+      const result = await pagarme(key, '/orders', { method: 'POST', idempotency: row.id, body: {
+        code: row.id, closed: true, customer,
+        items: [{ code: 'CS-TRP-013', description: row.product_name, amount: row.amount, quantity: 1 }],
+        payments: [{ payment_method: input.method, [input.method]: card }]
       } });
       http = result.http;
-      const saved = await storeCheckoutResponse(key, row, result, { operation: 'POST /paymentlinks', creationHttp: http });
-      await recordCreation(gateway, row, http);
-      return saved;
+      return await applyProviderOrder(row, { ...result, operation: 'POST /orders' });
     } catch (error) {
       if (!(error instanceof ProviderError)) throw error;
       const recordedHttp = http ?? error.http;
       const rejected = http === null && (rejectedCreation.has(error.http) || error.category === 'gateway_configuration');
-      const diagnostic = error.diagnostic ?? { operation: 'POST /paymentlinks', http: error.http, check: error.category };
+      const diagnostic = error.diagnostic ?? { operation: 'POST /orders', http: error.http, check: error.category };
       console.warn('Falha no checkout Pagar.me', { order: row.id, environment: row.environment, http: recordedHttp, category: error.category, diagnostic });
       const saved = await one(db, `UPDATE cs_trp_013_v2.orders SET
         status=CASE WHEN checkout_url IS NULL AND provider_order IS NULL AND reconciliation_at IS NULL THEN $2 ELSE status END,
@@ -354,6 +377,10 @@ export function makePayments(db, config, pagarme) {
       [row.id, rejected ? 'request_failed' : 'communication_error', recordedHttp, error.category, rejected ? 'rejected' : 'pending',
         JSON.stringify(diagnostic)])
         ?? await get(row.id);
+      if (rejected && saved.status === 'request_failed') {
+        await db.query(`INSERT INTO cs_trp_013_v2.transactions(order_id,status,payment_method,authentication_status)
+          VALUES ($1,$2,$3,$4)`, [row.id, saved.status, row.payment_method, row.authentication_status]);
+      }
       await recordCreation(gateway, row, recordedHttp, error.category);
       return saved;
     }
@@ -464,7 +491,7 @@ export function makePayments(db, config, pagarme) {
   }
 
   async function status(row) {
-    if (!row.hosted_checkout || !activeHostedStatuses.includes(row.status) ||
+    if (!activeHostedStatuses.includes(row.status) ||
         row.reconciliation_state === 'rejected') return row;
     if (row.status === 'processing' && Date.now() - Date.parse(row.created_at) < 20000) return row;
     const claimed = await one(db, `UPDATE cs_trp_013_v2.orders SET checkout_synced_at=now()
@@ -486,6 +513,9 @@ export function makePayments(db, config, pagarme) {
     const charge = data.charges?.[0];
     if (data.amount !== row.amount || (charge && charge.amount !== row.amount)) {
       throw responseError(operation, result, 'order_amount', 'order_amount_mismatch');
+    }
+    if (row.payment_method && charge?.payment_method && charge.payment_method !== row.payment_method) {
+      throw responseError(operation, result, 'payment_method', 'order_reference_mismatch');
     }
     const snapshot = readPayment(charge, data.status);
     if (charge && !snapshot.chargeId) throw responseError(operation, result, 'charge_id', 'order_reference_mismatch');
@@ -515,7 +545,9 @@ export function makePayments(db, config, pagarme) {
         if (!row.hosted_checkout || row.provider_order || !incompatible || error.http < 200 || error.http >= 300) throw error;
         orderError = error;
       }
-      return row.hosted_checkout ? await refreshHostedCheckout(key, current, { orderError, signal }) : row;
+      if (row.hosted_checkout) return await refreshHostedCheckout(key, current, { orderError, signal });
+      return row.provider_order || !['processing','communication_error'].includes(row.status)
+        ? row : await setReconciliation(current, { http: 200 });
     } catch (error) {
       if (!(error instanceof ProviderError || error instanceof HttpError)) throw error;
       const category = error.category ?? 'gateway_configuration';
@@ -532,7 +564,7 @@ export function makePayments(db, config, pagarme) {
 
   async function operate(row, action) {
     const statuses = action === 'capture' ? ['authorized'] : ['authorized','paid','captured'];
-    if (!row.provider_charge || !statuses.includes(row.status)) throw new HttpError(409, 'A ação não está disponível neste estado.');
+    if ((action === 'capture' && row.payment_method === 'debit_card') || !row.provider_charge || !statuses.includes(row.status)) throw new HttpError(409, 'A ação não está disponível neste estado.');
     if (row.environment === 'live' && !config.allowLive) throw new HttpError(409, 'Operações financeiras de produção estão bloqueadas.');
     const key = await keyFor(row);
     const operation = await db.tx(async client => {

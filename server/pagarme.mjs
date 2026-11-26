@@ -101,6 +101,11 @@ const paymentStatuses = new Set([
   'canceled','cancelled','voided','refunded','partial_refunded','chargedback'
 ]);
 
+function cleanRefusal(message) {
+  if (typeof message !== 'string' || !/^[\p{L} .,;:!?()'-]{1,180}$/u.test(message)) return null;
+  return message;
+}
+
 export function readPayment(charge, orderStatus) {
   const transaction = charge?.last_transaction;
   const chargeStatus = charge?.status;
@@ -124,8 +129,12 @@ export function readPayment(charge, orderStatus) {
     chargeId: providerId(charge?.id, 'ch'),
     transactionId: providerId(transaction?.id, 'tran'),
     updatedAt: Number.isFinite(date) ? new Date(date) : null,
+    authorized: ['authorized','paid','captured'].includes(status)
+      ? [transaction?.authorized_amount, charge?.paid_amount || undefined, transaction?.amount, charge?.amount]
+        .find(amount => Number.isSafeInteger(amount) && amount >= 0) ?? null : null,
     paid: Number.isSafeInteger(charge?.paid_amount) ? charge.paid_amount : null,
     refusalCode: status === 'declined' && typeof refusalCode === 'string' && /^[A-Za-z0-9]{1,8}$/.test(refusalCode) ? refusalCode : null,
-    refusalReason: status === 'declined' ? 'Pagamento recusado pela Pagar.me.' : null
+    refusalReason: status === 'declined'
+      ? cleanRefusal(transaction?.acquirer_message) ?? 'Pagamento recusado pela Pagar.me.' : null
   };
 }

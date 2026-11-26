@@ -56,10 +56,18 @@ try {
   await modal.getByRole('button', { name: 'TESTAR CONEXÃO' }).click();
   await modal.locator('[role=status]').getByText('Pagar.me respondeu às consultas autenticadas de leitura.').waitFor();
   assert.equal(await modal.getByLabel('Identificador da conta Pagar.me').count(), 0);
-  await modal.getByRole('button', { name: 'ATIVAR GATEWAY', exact: true }).click();
-  await modal.getByRole('checkbox', { name: /Confirmei que a Secret Key/ }).check();
-  await modal.getByRole('button', { name: 'Confirmar', exact: true }).click();
-  await modal.getByText('Conectado e ativado').waitFor();
+  async function configureCards() {
+    await modal.getByLabel('Chave pública (PK) da conta').fill('pk_test_fixture123');
+    await modal.getByRole('checkbox', { name: 'Ativar cartão de débito' }).check();
+    await modal.getByLabel('Referência da habilitação do débito pela Pagar.me e adquirente').fill('sandbox-approved-reference');
+    await modal.getByRole('button', { name: 'Salvar modalidades' }).click();
+    await modal.getByText('Configurações de cartão salvas.').waitFor();
+    await modal.getByRole('button', { name: 'ATIVAR GATEWAY', exact: true }).click();
+    await modal.getByRole('checkbox', { name: /Confirmei que a conta/ }).check();
+    await modal.getByRole('button', { name: 'Confirmar', exact: true }).click();
+    await modal.getByText('Conectado e ativado').waitFor();
+  }
+  await configureCards();
   await secretField.fill(wrongKey);
   await modal.getByRole('button', { name: 'SUBSTITUIR CHAVE SK' }).click();
   await modal.getByRole('alert').getByText(/recusou a autenticação/).waitFor();
@@ -67,6 +75,7 @@ try {
   await secretField.fill(secondKey);
   await modal.getByRole('button', { name: 'SUBSTITUIR CHAVE SK' }).click();
   await modal.getByText(/Chave substituída/).waitFor();
+  await configureCards();
   await modal.getByRole('button', { name: 'Abrir configuração comercial', exact: true }).click();
   await modal.getByLabel('Valor da venda').fill('2.999,99');
   await modal.getByLabel('Máximo de parcelas').fill('6');
@@ -88,70 +97,44 @@ try {
   }
   await fillBuyer();
 
-  assert.equal(await page.getByLabel('Número do cartão').count(), 0);
-  const stoneCheckout = 'https://payment-link.stone.com.br/**';
-  app.remote.checkoutHost = 'payment-link.stone.com.br';
-  await page.route(stoneCheckout, async route => {
-    const id = new URL(route.request().url()).pathname.slice(1);
-    const link = app.remote.links.get(id);
-    assert.ok(link);
-    await route.fulfill({
-      contentType: 'text/html; charset=utf-8',
-      body: '<h1>Pagar.me (provedor de teste)</h1><a href="' + app.origin + '/?pedido=' + app.remote.linkCodes.get(link.id) + '">Voltar à loja</a>'
-    });
-  });
-  const finalizePayment = page.getByRole('button', { name: 'FINALIZAR PAGAMENTO' });
-  await finalizePayment.click();
-  await page.waitForURL(stoneCheckout);
-  await page.getByRole('heading', { name: 'Pagar.me (provedor de teste)' }).waitFor();
-  assert.equal(page.context().pages().length, 1);
-  assert.equal(app.remote.linkPosts, 1);
-  const link = [...app.remote.links.values()][0];
-  await page.getByRole('link', { name: 'Voltar à loja' }).click();
-  const continuePayment = page.getByRole('link', { name: 'CONTINUAR NA PAGAR.ME' });
-  await continuePayment.waitFor();
-  assert.equal(await finalizePayment.count(), 0);
-  await continuePayment.click();
-  await page.waitForURL(stoneCheckout);
-  assert.equal(app.remote.linkPosts, 1);
-  app.remote.complete(app.remote.linkCodes.get(link.id));
-  await app.db.query('UPDATE cs_trp_013_v2.orders SET checkout_synced_at=NULL WHERE id=$1', [app.remote.linkCodes.get(link.id)]);
-  await page.getByRole('link', { name: 'Voltar à loja' }).click();
-  await page.getByText('Pagamento aprovado', { exact: true }).waitFor();
-  assert.ok(!ownRequests.some(body => body.includes('"token"') || body.includes('"cvv"') || body.includes('"holder_name"')));
-  if (process.env.BROWSER_SCREENSHOT_DIR) {
-    await page.screenshot({ path: process.env.BROWSER_SCREENSHOT_DIR + '/desktop.png', fullPage: true });
+  let token = 'token_approved';
+  const sdkStatus = 'Y';
+  await page.route('https://api.pagar.me/core/v5/tokens?*', route => route.fulfill({
+    json: { id: token }, headers: { 'Access-Control-Allow-Origin': '*' }
+  }));
+  await page.route('https://3ds-nx-js.stone.com.br/test/v2/3ds2.min.js', route => route.fulfill({
+    contentType: 'text/javascript',
+    body: 'window.TDS = { init: async () => [{ trans_status: ' + JSON.stringify(sdkStatus) +
+      ', tds_server_trans_id: "baa4cf29-7389-4db9-bf87-c16d1647fed8" }] }'
+  }));
+  async function fillCard() {
+    await page.getByLabel('Número do cartão').fill('4000100511112003');
+    await page.getByLabel('Nome impresso no cartão').fill('COMPRADOR TESTE');
+    await page.getByLabel('Mês (MM)').fill('12');
+    await page.getByLabel('Ano (AAAA)').fill(String(new Date().getFullYear() + 2));
+    await page.getByLabel('Código de segurança do cartão (CVV)').fill('123');
   }
+  const finalizePayment = page.getByRole('button', { name: 'FINALIZAR PAGAMENTO' });
+  await page.getByLabel('Parcelamento').selectOption('3');
+  await fillCard();
+  await finalizePayment.click();
+  await page.getByText('Pagamento aprovado', { exact: true }).waitFor();
+  assert.equal(app.remote.linkPosts, 0);
+  assert.equal(app.remote.calls.find(call => call.method === 'POST' && call.route === '/orders').body.payments[0].credit_card.installments, 3);
+  assert.ok(!ownRequests.some(body => body.includes('4000100511112003') || body.includes('"cvv"') || body.includes('"holder_name"')));
   await page.reload();
   await page.getByText('Pagamento aprovado', { exact: true }).waitFor();
   await page.getByRole('button', { name: 'Nova compra' }).click();
-  assert.equal(await finalizePayment.isEnabled(), true);
   await fillBuyer();
-  app.remote.respondToCreation = ({ link, persist }) => {
-    persist();
-    return Response.json({ ...link, url: 'http://payment-link.stone.com.br/' + link.id }, { status: 201 });
-  };
-  app.remote.orderLookup = () => Response.json({ data: null });
-  app.remote.checkoutDetails = () => Response.json({}, { status: 503 });
+  await page.getByRole('radio', { name: 'Cartão de débito' }).check();
+  assert.equal(await page.getByLabel('Parcelamento').count(), 0);
+  await page.getByText('À vista · R$ 2.999,99', { exact: true }).waitFor();
+  await fillCard();
+  token = 'token_declined';
   await finalizePayment.click();
-  await page.getByText('Falha ao confirmar o checkout', { exact: true }).waitFor();
-  await page.getByText('Conciliação pendente com a Pagar.me.').waitFor();
-  const pendingReference = new URL(page.url()).searchParams.get('pedido');
-  assert.ok(pendingReference);
-  assert.equal(await continuePayment.count(), 0);
-  app.remote.checkoutDetails = null;
-  await app.db.query('UPDATE cs_trp_013_v2.orders SET checkout_synced_at=NULL WHERE id=$1', [pendingReference]);
-  await continuePayment.click();
-  await page.waitForURL(stoneCheckout);
-  assert.equal(app.remote.linkPosts, 2);
-  assert.equal(page.context().pages().length, 1);
-  app.remote.orderLookup = null;
-  app.remote.complete(pendingReference, 'failed');
-  await app.db.query('UPDATE cs_trp_013_v2.orders SET checkout_synced_at=NULL WHERE id=$1', [pendingReference]);
-  await page.getByRole('link', { name: 'Voltar à loja' }).click();
   await page.getByText('Pagamento recusado', { exact: true }).waitFor();
+  assert.equal(app.remote.calls.findLast(call => call.method === 'POST' && call.route === '/orders').body.payments[0].payment_method, 'debit_card');
   await page.getByRole('button', { name: 'Nova compra' }).click();
-
 
   await page.getByRole('button', { name: /CONECTAR CHAVE SK/ }).click();
   await modal.getByRole('button', { name: 'DESATIVAR GATEWAY' }).click();
@@ -183,7 +166,7 @@ try {
   await page.keyboard.press('Escape');
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
   assert.deepEqual(errors, []);
-  console.log('Chromium: checkout, modal, autenticação, credenciais, redirecionamento na mesma aba e pagamento simulado, ViaCEP, saída e responsividade (1448/768/390/320 px).');
+  console.log('Chromium: checkout, modal, autenticação, credenciais, crédito, débito e autenticação simulada, ViaCEP, saída e responsividade (1448/768/390/320 px).');
 } finally {
   await browser?.close();
   await app.close();

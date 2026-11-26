@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, brl, dateTime, explain, providerErrorLabel, reconciliations, statusLabel, type Environment } from '../services/api';
+import { api, brl, dateTime, explain, providerErrorLabel, reconciliations, statusLabel, type Environment, type CardMethod } from '../services/api';
 import { Loader } from '../components/UI';
 
 interface Diagnostic {
@@ -15,9 +15,16 @@ interface Row {
   checkout_http: number | null; checkout_error: string | null; reconciliation_state: string | null;
   reconciliation_http: number | null; reconciliation_error: string | null; reconciliation_at: string | null;
   checkout_diagnostic: Diagnostic | null; reconciliation_diagnostics: Diagnostic[] | null;
+  payment_method: CardMethod | null; authorized_amount: number | null;
+  provider_transaction: string | null; authentication_status: string | null;
   refusal_code: string | null; refusal_reason: string | null; http_status: number | null;
 }
 type Event = { id: number; provider_id: string | null; status: string; created_at: string };
+const methodLabel = (method: CardMethod | null) => method === 'credit_card' ? 'Crédito' : method === 'debit_card' ? 'Débito' : '—';
+const authenticationLabels: Record<string, string> = {
+  Y: 'Concluída', A: 'Tentativa registrada', N: 'Não autenticada', C: 'Desafio incompleto',
+  U: 'Indisponível', R: 'Negada', I: 'Informativa', canceled: 'Cancelada', unavailable: 'Indisponível'
+};
 type Action = 'refresh' | 'capture' | 'cancel';
 
 const urlChecks: Record<string, string> = {
@@ -80,10 +87,10 @@ export function Transactions({ env, csrf }: { env: Environment; csrf: string }) 
     {!result && !error && <p><Loader /> Carregando histórico</p>}
     {result?.rows.length === 0 && <p className="notice">Nenhum pedido neste ambiente.</p>}
     {!!result?.rows.length && <div className="table-scroll"><table>
-      <thead><tr><th>Pedido</th><th>Data</th><th>Valor</th><th>Status</th><th>Provedor</th></tr></thead>
+      <thead><tr><th>Pedido</th><th>Data</th><th>Valor</th><th>Modalidade</th><th>Status</th><th>Provedor</th></tr></thead>
       <tbody>{result.rows.map(row => <tr key={row.id}>
         <td><button type="button" className="text-button" onClick={() => void open(row.id)}>{row.id.slice(0,8)}</button></td>
-        <td>{dateTime(row.created_at)}</td><td>{brl(row.amount)}</td><td>{statusLabel(row.status)}</td><td>{row.provider_order ?? row.checkout_provider_id ?? '—'}</td>
+        <td>{dateTime(row.created_at)}</td><td>{brl(row.amount)}</td><td>{methodLabel(row.payment_method)}</td><td>{statusLabel(row.status)}</td><td>{row.provider_order ?? row.checkout_provider_id ?? '—'}</td>
       </tr>)}</tbody>
     </table></div>}
     {(page > 1 || result?.hasNext) && <div className="dialog-actions">
@@ -94,6 +101,10 @@ export function Transactions({ env, csrf }: { env: Environment; csrf: string }) 
       <div className="transaction-header"><h3>Detalhes do pedido</h3><button className="text-button" onClick={() => setDetails(undefined)}>Fechar detalhes</button></div>
       <dl className="gateway-facts">
         <div><dt>Pedido local</dt><dd>{details.row.id}</dd></div>
+        <div><dt>Modalidade</dt><dd>{methodLabel(details.row.payment_method)}</dd></div>
+        <div><dt>Valor autorizado</dt><dd>{details.row.authorized_amount == null ? '—' : brl(details.row.authorized_amount)}</dd></div>
+        <div><dt>Transação Pagar.me</dt><dd>{details.row.provider_transaction ?? '—'}</dd></div>
+        <div><dt>Autenticação 3DS</dt><dd>{authenticationLabels[details.row.authentication_status ?? ''] ?? '—'}</dd></div>
         <div><dt>Conta comercial</dt><dd>{details.row.account ?? '—'}</dd></div>
         <div><dt>Checkout Pagar.me</dt><dd>{details.row.checkout_provider_id ?? '—'}</dd></div>
         <div><dt>Pedido Pagar.me</dt><dd>{details.row.provider_order ?? '—'}</dd></div>
@@ -127,7 +138,7 @@ export function Transactions({ env, csrf }: { env: Environment; csrf: string }) 
       <ul className="events">{details.events.map(event => <li key={event.id}>{dateTime(event.created_at)} · {statusLabel(event.status)} {event.provider_id ?? ''}</li>)}</ul>
       <div className="gateway-actions">
         <button className="button secondary" disabled={busy} onClick={() => void run('refresh')}>{busy && <Loader />} Consultar provedor</button>
-        {details.row.status === 'authorized' && <button className="button primary" disabled={busy} onClick={() => setConfirm('capture')}>Capturar</button>}
+        {details.row.status === 'authorized' && details.row.payment_method !== 'debit_card' && <button className="button primary" disabled={busy} onClick={() => setConfirm('capture')}>Capturar</button>}
         {['authorized','paid','captured'].includes(details.row.status) && <button className="button danger" disabled={busy} onClick={() => setConfirm('cancel')}>{details.row.status === 'authorized' ? 'Cancelar autorização' : 'Estornar'}</button>}
       </div>
       {confirm && <div className="confirmation"><p>Confirma {confirm === 'capture' ? 'a captura' : 'o cancelamento ou estorno'} de {brl(details.row.amount)}?</p>

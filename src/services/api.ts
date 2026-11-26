@@ -1,3 +1,4 @@
+export type CardMethod = 'credit_card' | 'debit_card';
 export type Environment = 'test' | 'live';
 
 export interface Product {
@@ -8,6 +9,9 @@ export interface Product {
   maxInstallments: number;
   enabled: boolean;
   ready?: boolean;
+  publicKey?: string | null;
+  methods?: Record<CardMethod, boolean>;
+  requires3ds?: Record<CardMethod, boolean>;
   gatewayVersion?: number;
   environment: Environment;
   operation: 'auth_and_capture' | 'auth_only';
@@ -35,6 +39,15 @@ export interface Receipt {
 export interface Gateway {
   environment: Environment;
   hasKey: boolean;
+  publicKey: string | null;
+  creditEnabled: boolean;
+  debitEnabled: boolean;
+  debitApprovalConfigured: boolean;
+  threeDS?: boolean | null;
+  debitAuthorizationReference: string | null;
+  creditRequires3ds: boolean;
+  debitRequires3ds: boolean;
+  available: Record<CardMethod, boolean>;
   enabled: boolean;
   connected: boolean | null;
   testedAt: string | null;
@@ -52,7 +65,7 @@ export interface Gateway {
 }
 
 export const statusLabels: Record<string, string> = {
-  created: 'Pedido criado', processing: 'Pagamento iniciado', authorized: 'Pagamento autorizado',
+  authentication_incomplete: 'Autenticação não concluída', created: 'Pedido criado', processing: 'Pagamento iniciado', authorized: 'Pagamento autorizado',
   captured: 'Pagamento capturado', paid: 'Pagamento aprovado', declined: 'Pagamento recusado',
   pending: 'Pagamento pendente', review: 'Pagamento em análise', canceled: 'Pagamento cancelado',
   expired: 'Prazo do checkout encerrado', refunded: 'Pagamento estornado', chargedback: 'Contestação registrada',

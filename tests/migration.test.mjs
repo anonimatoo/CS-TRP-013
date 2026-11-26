@@ -7,7 +7,7 @@ import { migrate } from '../scripts/db.mjs';
 import { encrypt, decrypt } from '../server/security.mjs';
 import { firstKey } from './fixture.mjs';
 
-test('Migrações 003 e 004 mantêm checkout, preço e credencial protegida de uma base 002', async t => {
+test('Migrações 003 a 005 mantêm checkout, preço e credencial protegida de uma base 002', async t => {
   const pg = new PGlite();
   t.after(() => pg.close());
   const adapter = client => ({
@@ -42,9 +42,11 @@ test('Migrações 003 e 004 mantêm checkout, preço e credencial protegida de u
   assert.equal(order.checkout_diagnostic, null);
   assert.equal(order.reconciliation_diagnostics, null);
   assert.equal(order.amount, 20000);
+  assert.equal(order.payment_method, 'credit_card');
   const { rows: [gateway] } = await pg.query("SELECT * FROM cs_trp_013_v2.gateway WHERE environment='test'");
   assert.equal(gateway.secret, sealed);
   assert.equal(decrypt(key, gateway.secret, 'test:null'), firstKey);
   assert.equal(gateway.enabled, true);
+  assert.equal(gateway.debit_enabled, false);
   assert.equal(gateway.checkout_creation_verified_at, null);
 });

@@ -45,8 +45,10 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
   const post = (path, body = {}, extra) => req(path, { method: 'POST', body, ...extra });
   const keyAction = (action, body) => post('/admin/gateway/test/' + action, body);
   let gatewayVersion;
+  const publicKey = 'pk_test_fixture123';
+  const authentication = { status: 'Y', transactionId: randomUUID() };
   const input = version => ({
-    id: randomUUID(), version, gatewayVersion, installments: 3,
+    id: randomUUID(), version, gatewayVersion, installments: 3, method: 'credit_card', cardToken: 'token_approved', authentication,
     buyer: { name: 'Comprador Teste', cpf: '52998224725', email: 'teste@example.com', phone: '11900000000',
       cep: '01001000', street: 'Praça da Sé', number: '1', complement: '', neighborhood: 'Sé', city: 'São Paulo', state: 'SP', country: 'BR' }
   });
@@ -95,9 +97,9 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
     assert.equal((await req('/admin/gateway/live')).json.activationBlock, productionActivation.json.message);
     assert.equal((await keyAction('add', { secret: 'sk_invalid' })).status, 422);
     assert.equal((await keyAction('add', { secret: wrongKey })).json.http, 401);
-    const savedKey = (await keyAction('add', { secret: firstKey })).json;
+    const savedKey = (await keyAction('add', { secret: firstKey, publicKey })).json;
     assert.equal(savedKey.hasKey, true);
-    assert.equal('publicKey' in savedKey, false);
+    assert.equal(savedKey.publicKey, publicKey);
     assert.equal('account' in savedKey, false);
     assert.equal(savedKey.enabled, false);
     assert.equal((await req('/checkout')).json.ready, false);
@@ -127,45 +129,35 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
     const [a,b] = await Promise.all([post('/orders', good), post('/orders', good)]);
     assert.equal(a.status, 200);
     assert.equal(b.status, 200);
-    assert.equal(app.remote.linkPosts, 1);
-    const initiated = [a.json,b.json].find(order => order.checkoutUrl);
-    assert.equal(initiated.status, 'pending');
-    assert.match(initiated.checkoutUrl, /^https:\/\/payment-link\.pagar\.me\//);
-    const sent = app.remote.calls.find(call => call.method === 'POST' && call.route === '/paymentlinks');
-    assert.equal(sent.hostname, 'sdx-api.pagar.me');
+    assert.equal(app.remote.linkPosts, 0);
+    const posts = app.remote.calls.filter(call => call.method === 'POST' && call.route === '/orders');
+    assert.equal(posts.length, 1);
+    const [sent] = posts;
     assert.equal(sent.idempotency, good.id);
-    assert.equal(sent.body.order_code, good.id);
-    assert.equal(sent.body.max_sessions, 1);
-    assert.equal(sent.body.max_paid_sessions, 1);
-    assert.deepEqual(sent.body.cart_settings.items, [{ amount: 299999, name: 'PC Gamer', default_quantity: 1 }]);
-    assert.deepEqual(sent.body.payment_settings.credit_card_settings.installments, [{ number: 3, total: 299999 }]);
-    assert.equal(sent.body.customer_settings.customer.document, good.buyer.cpf);
-    app.remote.complete(good.id);
+    assert.equal(sent.body.code, good.id);
+    assert.equal(sent.body.items[0].amount, 299999);
+    assert.equal(sent.body.payments[0].credit_card.installments, 3);
+    assert.equal(sent.body.payments[0].credit_card.authentication.threed_secure.transaction_id, authentication.transactionId);
+    assert.equal(sent.body.customer.document, good.buyer.cpf);
     paid = (await req('/orders/' + good.id)).json;
     assert.equal(paid.status, 'paid');
     assert.equal(paid.amount, 299999);
     assert.equal(paid.checkoutUrl, null);
-    const request = input(version);
-    assert.equal((await post('/orders', request)).json.status, 'pending');
-    app.remote.complete(request.id, 'failed');
-    declined = (await req('/orders/' + request.id)).json;
+    declined = (await post('/orders', { ...input(version), cardToken: 'token_declined' })).json;
     assert.equal(declined.status, 'declined');
     assert.equal(declined.refusalCode, '0051');
     assert.ok(!('refusalReason' in declined));
-    assert.equal((await req('/admin/orders/' + declined.id)).json.row.refusal_reason, 'Pagamento recusado pela Pagar.me.');
+    assert.equal((await req('/admin/orders/' + declined.id)).json.row.refusal_reason, 'Recusa do fixture local');
   });
 
   await t.test('conciliação de falha ambígua, webhook autenticado e deduplicado', async () => {
     const uncertain = input(version);
-    app.remote.nextLinkFault = 'timeout';
+    app.remote.orderTimeout = true;
     assert.equal((await post('/orders', uncertain)).json.status, 'communication_error');
-    const before = app.remote.linkPosts;
-    assert.equal((await post('/orders', uncertain)).json.status, 'pending');
-    assert.equal(app.remote.linkPosts, before);
-    const resumed = (await req('/orders/' + uncertain.id)).json;
-    assert.equal(resumed.status, 'pending');
-    assert.ok(resumed.checkoutUrl);
-    const reference = app.remote.complete(uncertain.id);
+    const before = app.remote.calls.filter(call => call.method === 'POST').length;
+    assert.equal((await post('/orders', uncertain)).json.status, 'paid');
+    assert.equal(app.remote.calls.filter(call => call.method === 'POST').length, before);
+    const reference = [...app.remote.orders.values()].find(order => order.code === uncertain.id);
     const event = { id: 'hook_DemoHook001', account: { id: account }, type: 'order.paid', data: { id: reference.id, code: reference.code } };
     assert.equal((await post('/hooks/pagarme/invalido', event)).status, 404);
     assert.equal((await post('/hooks/pagarme/' + hookSecret, event)).status, 502);
@@ -183,7 +175,7 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
     const before = (await app.db.query('SELECT secret FROM cs_trp_013_v2.gateway WHERE environment=$1', ['test'])).rows[0].secret;
     assert.equal((await keyAction('replace', { secret: wrongKey })).status, 422);
     assert.equal((await app.db.query('SELECT secret FROM cs_trp_013_v2.gateway WHERE environment=$1', ['test'])).rows[0].secret, before);
-    const rotated = await keyAction('replace', { secret: secondKey });
+    const rotated = await keyAction('replace', { secret: secondKey, publicKey });
     assert.equal(rotated.status, 200);
     assert.equal(rotated.json.enabled, true);
     assert.equal((await post('/orders', input(version))).json.safeToRetry, true);
@@ -191,15 +183,46 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
     const saved = await updateProduct({ ...product, operation: 'auth_only' });
     version = saved.json.version;
     const manual = (await post('/orders', input(version))).json;
-    assert.equal(manual.status, 'pending');
+    assert.equal(manual.status, 'authorized');
     assert.equal(app.remote.calls.at(-1).key, secondKey);
-    assert.equal(app.remote.calls.at(-1).body.payment_settings.credit_card_settings.operation_type, 'auth_only');
-    app.remote.complete(manual.id, 'pending');
+    assert.equal(app.remote.calls.at(-1).body.payments[0].credit_card.operation_type, 'auth_only');
     assert.equal((await req('/orders/' + manual.id)).json.status, 'authorized');
     assert.equal((await post('/admin/orders/' + manual.id + '/capture', { confirmed: true })).json.status, 'paid');
     assert.equal((await post('/admin/orders/' + manual.id + '/cancel', { confirmed: true })).json.status, 'refunded');
     assert.equal((await req('/admin/summary/test')).json.declined, 1);
     assert.ok((await req('/admin/report/test')).text.includes(paid.id));
+  });
+
+  await t.test('débito confirmado, à vista, 3DS obrigatório e desafio cancelado', async () => {
+    const debit = () => ({ ...input(version), method: 'debit_card', installments: 1 });
+    assert.equal((await post('/orders', debit())).status, 409);
+    const settings = { publicKey, creditEnabled: true, creditRequires3ds: true, debitEnabled: true,
+      debitRequires3ds: true, debitAuthorizationReference: 'invalid' };
+    assert.equal((await keyAction('cards', settings)).status, 422);
+    const approved = await keyAction('cards', { ...settings, debitAuthorizationReference: 'sandbox-approved-reference' });
+    assert.equal(approved.status, 200);
+    const checkout = (await req('/checkout')).json;
+    assert.equal(checkout.methods.debit_card, true);
+    gatewayVersion = checkout.gatewayVersion;
+    assert.equal((await post('/checkout/3ds', { method: 'debit_card', version, gatewayVersion })).json.token, 'fixture-3ds-token');
+    await app.db.query('DELETE FROM cs_trp_013_v2.rate_limits');
+    assert.equal((await post('/orders', { ...debit(), installments: 2 })).status, 422);
+    assert.equal((await post('/orders', { ...debit(), authentication: undefined })).status, 422);
+    const before = app.remote.calls.length;
+    const canceled = (await post('/orders', { ...debit(), cardToken: undefined, authentication: { status: 'canceled' } })).json;
+    assert.equal(canceled.status, 'authentication_incomplete');
+    assert.equal(app.remote.calls.length, before);
+    const confirmed = (await post('/orders', debit())).json;
+    assert.equal(confirmed.status, 'paid');
+    const sent = app.remote.calls.at(-1).body.payments[0];
+    assert.equal(sent.payment_method, 'debit_card');
+    assert.equal(sent.debit_card.installments, undefined);
+    const { row, events } = (await req('/admin/orders/' + confirmed.id)).json;
+    assert.equal(row.payment_method, 'debit_card');
+    assert.equal(row.authorized_amount, 299999);
+    assert.equal(row.provider_transaction, events[0].provider_id);
+    assert.equal(events[0].authentication_status, 'Y');
+    assert.equal(app.remote.linkPosts, 0);
   });
 
   await t.test('desativação, consulta histórica, desconexão, sessão encerrada e limite de login', async () => {
@@ -212,12 +235,12 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
     assert.equal((await req('/admin/orders/' + paid.id)).json.row.status, 'paid');
     assert.equal((await post('/admin/logout')).status, 200);
     assert.equal((await req('/admin/session')).status, 401);
-    for (let index = 0; index < 6; index++) assert.equal((await post('/admin/login', { password: 'errada' })).status, 401);
+    for (let index = 0; index < 8; index++) assert.equal((await post('/admin/login', { password: 'errada' })).status, 401);
     assert.equal((await post('/admin/login', { password })).status, 429);
   });
 });
 
-test('checkout em produção exige ativação e retorna ao domínio configurado', async t => {
+test('checkout em produção exige ativação e usa pedidos oficiais', async t => {
   const origin = 'https://checkout.example';
   const app = await fixture({ originOverride: origin, allowLive: true });
   t.after(app.close);
@@ -234,7 +257,7 @@ test('checkout em produção exige ativação e retorna ao domínio configurado'
     return json;
   }
   csrf = (await request('/admin/login', { password })).csrf;
-  const saved = await request('/admin/gateway/live/add', { secret: liveKey });
+  const saved = await request('/admin/gateway/live/add', { secret: liveKey, publicKey: 'pk_fixture123' });
   assert.equal(saved.activationBlock, null);
   assert.equal(saved.connected, true);
   await request('/admin/product', {
@@ -249,21 +272,18 @@ test('checkout em produção exige ativação e retorna ao domínio configurado'
   assert.equal(app.remote.linkPosts, 0);
   const order = {
     id: randomUUID(), version: checkout.version, gatewayVersion: checkout.gatewayVersion, installments: 1,
+    method: 'credit_card', cardToken: 'token_approved', authentication: { status: 'Y', transactionId: randomUUID() },
     buyer: { name: 'Comprador Teste', cpf: '52998224725', email: 'teste@example.com', phone: '11900000000',
       cep: '01001000', street: 'Praça da Sé', number: '1', complement: '', neighborhood: 'Sé', city: 'São Paulo', state: 'SP', country: 'BR' }
   };
   const result = await request('/orders', order);
-  assert.equal(result.status, 'pending');
+  assert.equal(result.status, 'paid');
   assert.equal(result.http, 201);
-  assert.equal(new URL(result.checkoutUrl).hostname, 'payment-link.stone.com.br');
+  assert.equal(result.checkoutUrl, null);
   const sent = app.remote.calls.filter(call => call.method === 'POST');
-  assert.deepEqual(sent.map(call => call.route), ['/paymentlinks']);
+  assert.deepEqual(sent.map(call => call.route), ['/orders']);
   assert.equal(sent[0].hostname, 'api.pagar.me');
-  assert.equal(sent[0].body.flow_settings.success_url, origin + '/?pedido=' + order.id);
+  assert.equal(sent[0].body.code, order.id);
   const persisted = JSON.stringify((await app.db.query('SELECT * FROM cs_trp_013_v2.orders')).rows);
   assert.ok(!persisted.includes('52998224725') && !persisted.includes('teste@example.com'));
-  app.remote.nextLinkFault = 'invalid_url';
-  const malicious = await request('/orders', { ...order, id: randomUUID() });
-  assert.equal(malicious.checkoutUrl, null);
-  assert.equal(malicious.status, 'communication_error');
 });

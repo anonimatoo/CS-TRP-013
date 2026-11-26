@@ -1,7 +1,8 @@
+import { authenticateCard, tokenizeCard } from '../services/cards';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { BadgeCheck, Barcode, Check, CreditCard, Hash, Headset, Info, Laptop, LockKeyhole, Mail, MapPin, Phone, Search, Settings, ShieldCheck, Truck, UserRound } from 'lucide-react';
 import { digits, states, validCpf } from '../../shared/validation.mjs';
-import { ApiError, api, brl, explain, providerErrorLabel, statusLabel, type Product, type Receipt } from '../services/api';
+import { ApiError, api, brl, explain, providerErrorLabel, statusLabel, type CardMethod, type Product, type Receipt } from '../services/api';
 import { Field, Loader, SectionHeading } from '../components/UI';
 
 const defaultProduct = {
@@ -54,8 +55,13 @@ function installmentsLabel(amount: number, parts: number) {
 export function Checkout({ onAdmin, product, loadError, refresh }: {
   onAdmin: () => void; product: Product | null; loadError: string; refresh: () => void;
 }) {
-  const shop = product ?? defaultProduct;
+  const shop: Product = product ?? defaultProduct;
   const [buyer, setBuyer] = useState(emptyBuyer);
+  const [selectedMethod, setSelectedMethod] = useState<CardMethod>('credit_card');
+  const method = shop.methods?.[selectedMethod] ? selectedMethod : shop.methods?.credit_card ? 'credit_card' : shop.methods?.debit_card ? 'debit_card' : 'credit_card';
+  const methodContainer = useRef<HTMLDivElement>(null);
+  const challengeContainer = useRef<HTMLDivElement>(null);
+  const cardFields = useRef<HTMLFieldSetElement>(null);
   const [installments, setInstallments] = useState(1);
   const [lookup, setLookup] = useState({ busy: false, message: '' });
   const [error, setError] = useState('');
@@ -72,7 +78,7 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
   const saved = Boolean(lastId);
   const checkoutError = ['request_failed','communication_error'].includes(receipt?.status ?? '') ? receipt?.checkoutError : null;
   const checkoutTitle = receipt?.checkoutUrl ? 'Checkout criado'
-    : receipt?.status === 'processing' && !receipt.providerStatus ? 'Criando checkout'
+    : receipt?.status === 'processing' && !receipt.providerStatus ? 'Processando pagamento'
     : checkoutError === 'provider_authentication' || checkoutError === 'provider_permission'
       ? providerErrorLabel(checkoutError)
       : ['provider_validation','gateway_configuration'].includes(checkoutError ?? '') ? 'Erro de configuração do checkout'
@@ -143,16 +149,34 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
 
   async function pay(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!shop.ready || shop.gatewayVersion === undefined || (saved && !missing) || inFlight.current) return;
+    if (!shop.ready || !shop.publicKey || !shop.amount || shop.gatewayVersion === undefined || (saved && !missing) || inFlight.current) return;
     setError('');
     if (buyer.name.trim().split(/\s+/).length < 2) { setError('Informe o nome completo.'); return; }
     if (!validCpf(buyer.cpf)) { setError('Informe um CPF válido.'); return; }
     if (!/^[1-9][0-9]9\d{8}$/.test(digits(buyer.phone))) { setError('Informe um celular com DDD.'); return; }
     if (digits(buyer.cep).length !== 8) { setError('Informe um CEP com 8 dígitos.'); return; }
+    const form = new FormData(event.currentTarget);
+    const card = {
+      number: digits(String(form.get('card-number'))), holder_name: String(form.get('card-name')).trim(),
+      exp_month: Number(form.get('card-month')), exp_year: Number(form.get('card-year')), cvv: String(form.get('card-cvv'))
+    };
+    const now = new Date();
+    if (card.number.length < 13 || card.number.length > 19 || !card.holder_name ||
+        !/^[0-9]{3,4}$/.test(card.cvv) || card.exp_month < 1 || card.exp_month > 12 ||
+        card.exp_year < now.getFullYear() || (card.exp_year === now.getFullYear() && card.exp_month < now.getMonth() + 1)) {
+      setError('Confira os dados e a validade do cartão.');
+      return;
+    }
+    for (const input of cardFields.current?.querySelectorAll('input') ?? []) input.value = '';
     inFlight.current = true;
     setBusy(true);
     let id = '';
     try {
+      const request = { method, version: shop.version, gatewayVersion: shop.gatewayVersion };
+      const authentication = shop.requires3ds?.[method]
+        ? await authenticateCard(card, buyer, shop.amount, shop.environment, request, methodContainer.current!, challengeContainer.current!)
+        : undefined;
+      const cardToken = !authentication || authentication.transactionId ? await tokenizeCard(card, shop.publicKey) : undefined;
       id = lastId || crypto.randomUUID();
       receiptStorage(id);
       const url = new URL(window.location.href);
@@ -162,10 +186,10 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
       setMissing(false);
       setStatusError(false);
       const result = await api<Receipt>('/orders', { method: 'POST', body: {
-        id, version: shop.version, gatewayVersion: shop.gatewayVersion, installments, buyer
+        id, ...request, installments: method === 'debit_card' ? 1 : Math.min(installments, count), buyer, cardToken, authentication
       } });
       setReceipt(result);
-      if (result.checkoutUrl) window.location.assign(result.checkoutUrl);
+
     } catch (failure) {
       if (id && failure instanceof ApiError && failure.safeToRetry) {
         if (!lastId) newPurchase();
@@ -185,7 +209,7 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
       <div className="header-inner">
         <div className="brand"><Laptop size={41} aria-hidden="true" /><h1>CS TRP 013</h1></div>
         <div className="header-security"><ShieldCheck size={30} aria-hidden="true" /><div><strong>Checkout seguro</strong><span>Finalize sua compra</span></div></div>
-        <div className="header-benefits"><span><Truck size={26} /> Compra online</span><span><Headset size={25} /> Suporte do lojista</span><span><BadgeCheck size={25} /> Cartão de crédito</span></div>
+        <div className="header-benefits"><span><Truck size={26} /> Compra online</span><span><Headset size={25} /> Suporte do lojista</span><span><BadgeCheck size={25} /> Pagamento com cartão</span></div>
       </div>
     </header>
     <main className="container">
@@ -236,18 +260,37 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
           </section>
           <section className="panel form-panel payment-panel">
             <div className="payment-heading">
-              <SectionHeading icon={CreditCard} title="Pagamento" subtitle="Cartão de crédito" />
+              <SectionHeading icon={CreditCard} title="Pagamento" />
               <div className="brands" aria-label="Bandeiras sujeitas à habilitação da conta"><span className="visa">VISA</span><span className="mastercard" aria-label="Mastercard" /><span className="elo">elo</span><span className="amex">AMEX</span><span className="hiper">Hipercard</span></div>
             </div>
-            <label className="field">Parcelamento <select aria-label="Parcelamento" disabled={busy || (saved && !missing) || !shop.amount} value={Math.min(installments, count)} onChange={e => setInstallments(Number(e.target.value))}>
-              {shop.amount ? Array.from({ length: count }, (_, index) => <option key={index} value={index + 1}>{installmentsLabel(shop.amount!, index + 1)}</option>) : <option value={1}>Aguardando valor da venda</option>}
-            </select></label>
-            <div className="payment-note"><LockKeyhole size={23} /><span><strong>Pagamento no checkout oficial da Pagar.me</strong><small>Ao finalizar, você será encaminhado na mesma aba para preencher os dados do cartão.</small></span><b className="pagarme">pagar.me</b></div>
+            <fieldset className="card-methods" disabled={busy || (saved && !missing)}>
+              <legend>Forma de pagamento</legend>
+              {(['credit_card', 'debit_card'] as const).map(option => <label key={option}>
+                <input type="radio" name="payment-method" value={option} checked={Boolean(shop.methods?.[option] && method === option)}
+                  disabled={!shop.methods?.[option]} onChange={() => setSelectedMethod(option)} />
+                {option === 'credit_card' ? 'Cartão de crédito' : 'Cartão de débito'}
+                {!shop.methods?.[option] && <small>Indisponível</small>}
+              </label>)}
+            </fieldset>
+            {method === 'credit_card' ? <label className="field">Parcelamento <select aria-label="Parcelamento" disabled={busy || (saved && !missing) || !shop.amount} value={Math.min(installments, count)} onChange={e => setInstallments(Number(e.target.value))}>
+              {shop.amount ? Array.from({ length: count }, (_, index) => <option key={index} value={index + 1}>{index === 0 ? 'À vista · ' + brl(shop.amount!) : installmentsLabel(shop.amount!, index + 1)}</option>) : <option value={1}>Aguardando valor da venda</option>}
+            </select></label> : shop.methods?.debit_card && <p>À vista · {brl(shop.amount!)}</p>}
+            <fieldset ref={cardFields} className="card-entry fields two" disabled={!shop.ready || busy || (saved && !missing)}>
+              <legend>Dados do cartão</legend>
+              <Field label="Número do cartão" name="card-number" inputMode="numeric" autoComplete="cc-number" maxLength={24} required />
+              <Field label="Nome impresso no cartão" name="card-name" autoComplete="cc-name" maxLength={64} required />
+              <Field label="Mês (MM)" name="card-month" inputMode="numeric" autoComplete="cc-exp-month" pattern="[0-9]{1,2}" maxLength={2} required />
+              <Field label="Ano (AAAA)" name="card-year" inputMode="numeric" autoComplete="cc-exp-year" pattern="[0-9]{4}" maxLength={4} required />
+              <Field label="Código de segurança do cartão (CVV)" name="card-cvv" type="password" inputMode="numeric" autoComplete="off" pattern="[0-9]{3,4}" maxLength={4} required />
+            </fieldset>
+            <div ref={methodContainer} className="card-authentication-method" />
+            <div ref={challengeContainer} className="card-authentication-challenge" />
+            <div className="payment-note"><LockKeyhole size={23} /><span><strong>Processado pela Pagar.me / Stone</strong><small>Se o emissor pedir uma confirmação, siga as instruções na janela de autenticação.</small></span><b className="pagarme">pagar.me</b></div>
             {shop.environment === 'test' && shop.ready && <p className="notice info">Ambiente de teste. Use somente os cartões de teste oficiais da Pagar.me.</p>}
             {(loadError || (product && !shop.ready)) && <p className="notice" role="status">{loadError || 'O checkout está aguardando a liberação do lojista.'}</p>}
             {error && <p className="notice error" role="alert">{error}</p>}
             {saved && <div className="notice receipt" role="status">
-              <strong>{busy ? 'Criando checkout' : checkoutTitle}</strong>
+              <strong>{busy ? 'Processando pagamento' : checkoutTitle}</strong>
               <span>Pedido {lastId}</span>
               {receipt?.status === 'declined' && <span>A transação foi recusada. Confira os dados do cartão ou consulte o emissor.{receipt.refusalCode ? ' Código: ' + receipt.refusalCode + '.' : ''}</span>}
               {receipt?.status === 'request_failed' && <span>Fale com o lojista e informe a referência do pedido.</span>}
@@ -263,7 +306,7 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
               {receipt?.newPurchaseAllowed && <button type="button" className="button secondary" onClick={newPurchase}>Nova compra</button>}
             </div>}
             {(!saved || missing || busy) && <button className="button primary purchase" type="submit" disabled={busy || !shop.ready}>
-              {busy ? <Loader /> : <LockKeyhole size={20} />} {busy ? 'CRIANDO CHECKOUT' : missing ? 'TENTAR COM A MESMA REFERÊNCIA' : 'FINALIZAR PAGAMENTO'}
+              {busy ? <Loader /> : <LockKeyhole size={20} />} {busy ? 'PROCESSANDO PAGAMENTO' : missing ? 'TENTAR COM A MESMA REFERÊNCIA' : 'FINALIZAR PAGAMENTO'}
             </button>}
           </section>
         </form>
@@ -283,7 +326,7 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
             <h3><BadgeCheck size={18} /> Sobre o pagamento</h3>
             <p><Check size={16} /> Processamento via Pagar.me</p>
             <p><Check size={16} /> Acompanhe o resultado pelo pedido</p>
-            <p><Check size={16} /> Cartão de crédito com parcelamento</p>
+            <p><Check size={16} /> Opções sujeitas à habilitação do lojista</p>
           </div>
         </aside>
       </div>

@@ -31,7 +31,8 @@ export function configFromEnv(env = process.env) {
     throw new Error('Limites de valor inválidos.');
   }
   return { password, sessionSecret, encryptionKey, webhookSecret, origin: origin.origin, production, min, max,
-    allowLive: env.ALLOW_LIVE_PAYMENTS === 'true' };
+    allowLive: env.ALLOW_LIVE_PAYMENTS === 'true',
+    debitApproval: { test: env.PAGARME_DEBIT_APPROVAL_TEST, live: env.PAGARME_DEBIT_APPROVAL_LIVE } };
 }
 
 export function encrypt(key, data, context) {

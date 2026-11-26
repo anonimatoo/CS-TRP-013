@@ -73,6 +73,27 @@ export async function fixture({ browser = false, port = 0, originOverride, allow
     if (![firstKey,secondKey,liveKey].includes(key)) return output({ message: 'Invalid API key' }, 401);
     if (route === '/orders' && method === 'GET' && searchParams.has('code') && remote.orderLookup) return remote.orderLookup(searchParams);
     if (route === '/orders' && method === 'GET') return output({ data: [...remote.orders.values()].filter(order => !searchParams.has('code') || order.code === searchParams.get('code')) });
+    if (route === '/orders' && method === 'POST') {
+      const sequence = ++remote.sequence;
+      const payment = body.payments[0];
+      const card = payment[payment.payment_method];
+      const amount = body.items[0].amount;
+      const declined = card.card_token === 'token_declined';
+      const manual = card.operation_type === 'auth_only';
+      const status = declined ? 'failed' : manual ? 'pending' : 'paid';
+      const order = { id: 'or_Direct' + sequence, code: body.code, amount, status, charges: [{
+        id: 'ch_Direct' + sequence, amount, status, paid_amount: status === 'paid' ? amount : 0,
+        payment_method: payment.payment_method, updated_at: new Date().toISOString(),
+        last_transaction: { id: 'tran_Direct' + sequence, status: declined ? 'not_authorized' : manual ? 'authorized_pending_capture' : 'captured',
+          ...(declined ? { acquirer_return_code: '0051', acquirer_message: 'Recusa do fixture local' } : {}) }
+      }] };
+      remote.orders.set(order.id, order);
+      if (remote.orderTimeout) {
+        remote.orderTimeout = false;
+        throw new DOMException('Fixture timeout', 'TimeoutError');
+      }
+      return output(order, 201);
+    }
     if (route === '/paymentlinks' && method === 'POST') {
       const fault = remote.nextLinkFault;
       remote.nextLinkFault = '';
@@ -138,9 +159,10 @@ export async function fixture({ browser = false, port = 0, originOverride, allow
   const origin = 'http://127.0.0.1:' + server.address().port;
   const config = configFromEnv({
     ADMIN_PASSWORD: password, SESSION_SECRET: 'sessao_local_de_teste_exclusivamente_013',
-    ENCRYPTION_KEY: Buffer.alloc(32, 17).toString('base64'), WEBHOOK_SECRET: hookSecret, APP_ORIGIN: originOverride ?? origin, ALLOW_LIVE_PAYMENTS: String(allowLive)
+    ENCRYPTION_KEY: Buffer.alloc(32, 17).toString('base64'), WEBHOOK_SECRET: hookSecret, APP_ORIGIN: originOverride ?? origin, ALLOW_LIVE_PAYMENTS: String(allowLive), PAGARME_DEBIT_APPROVAL_TEST: 'sandbox-approved-reference'
   });
-  const app = createApp({ db, config, pagarme, viaFetch });
+  const app = createApp({ db, config, pagarme, viaFetch,
+    stoneFetch: async () => Response.json({ tds_token: 'fixture-3ds-token' }) });
   if (browser) {
     host.use((req, res, next) => {
       if (req.path.startsWith('/api/')) return app(req,res,next);
