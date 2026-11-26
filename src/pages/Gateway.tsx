@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Activity, CircleDot, KeyRound, Power, RefreshCw, Unlink } from 'lucide-react';
 import { pagarmeKeyEnvironment } from '../../shared/validation.mjs';
+import { DebitDiagnostics } from '../components/DebitDiagnostics';
 import { Field, Loader } from '../components/UI';
 import { ApiError, api, merchantPath, dateTime, envLabel, explain, providerErrorLabel, type Environment, type Gateway as GatewayState, type Product } from '../services/api';
 
@@ -183,6 +184,8 @@ export function Gateway({ csrf, merchant, env, product, onCommercialSettings, on
       </dl>
       <button className="button secondary" disabled={!!busy || !gateway.connected}>Salvar modalidades</button>
     </form>}
+    {gateway && <DebitDiagnostics key={env + ':' + gateway.updatedAt + ':' + gateway.testedAt}
+      csrf={csrf} merchant={merchant} env={env} disabled={!!busy} />}
     {gateway && pending && <div className="confirmation">
       <label><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} /> {pending === 'activate'
         ? (env === 'live' ? 'Confirmei que a conta está habilitada para cobranças diretas na Pagar.me e autorizo cobranças reais neste checkout.'

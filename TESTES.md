@@ -73,3 +73,27 @@ A execução requer um ambiente HTTPS com domínio cadastrado na Pagar.me, Neon 
 | Gateway desativado | Desativar gateway e confirmar bloqueio das novas compras na interface e na API. |
 | Modalidade não autorizada | Remover a habilitação de débito e verificar o bloqueio na interface e na API. |
 | Cobrança duplicada | Reenviar a mesma referência e conferir um único pedido no painel, inclusive após interrupção de rede. |
+
+## Diagnóstico de cartão de débito V5
+
+Na Central de Gateway, selecione o lojista e o ambiente e execute **Diagnóstico de cartão de débito**. O painel usa a Secret Key cadastrada para verificar as permissões observáveis de leitura de pedidos, webhooks e cobranças. O identificador da conta vem dos webhooks ou do vínculo registrado. Quando já consta no cadastro local da conta, o modelo Gateway ou PSP aparece com a indicação da origem. A API consultada não retorna uma lista de permissões comerciais, modelo de conta ou adquirentes habilitadas. [Listar pedidos](https://docs.pagar.me/reference/listar-pedidos) · [Listar webhooks](https://docs.pagar.me/reference/listar-webhooks) · [Listar cobranças](https://docs.pagar.me/reference/listar-cobra%C3%A7as)
+
+O histórico amostra até 50 cobranças da primeira página. A adquirente é a informada pelo provedor na última transação de cada cobrança de débito. A modalidade histórica é identificada quando cobrança e transação coincidem com o registro de autenticação do checkout para a mesma conta, ambiente e lojista. A emissão de token 3DS Stone verifica o acesso ao início da autenticação. [Referência de débito](https://docs.pagar.me/reference/cart%C3%A3o-de-d%C3%A9bito-2) · [Manual 3DS](https://docs.pagar.me/docs/manual-integracao-3ds)
+
+Para executar aprovação e recusa no simulador oficial, configure `PAGARME_DEBIT_SANDBOX_KEY` com uma Secret Key de um Sandbox autorizado em `.env.local` ou no ambiente seguro e rode:
+
+```sh
+npm run test:debit:sandbox
+```
+
+O comando cria até dois pedidos de teste usando exclusivamente os números publicados pelo simulador. Ele exibe cenário, HTTP, identificadores e resultado. O resultado dessas operações sem autenticação documenta o comportamento do simulador. Para validar autenticação ponta a ponta, use o fluxo 3DS e os cartões do manual, conforme a seção anterior. [Autenticação da API V5](https://docs.pagar.me/reference/autentica%C3%A7%C3%A3o-2) · [Simulador de cartão de débito](https://docs.pagar.me/docs/simulador-de-cart%C3%A3o-de-d%C3%A9bito)
+
+### Verificação em 26/11/2026
+
+| Comando | Resultado observado |
+| --- | --- |
+| `npm run check` | Sintaxe JavaScript e TypeScript aprovados. |
+| `npm run build` | Build de produção Vite concluído, com 1.754 módulos processados. |
+| `npm test` | 43 testes aprovados, zero falhas e zero ignorados. Inclui API Express com PGlite, integração simulada com a Pagar.me e SMTP, migrações, autorização comercial e isolamento entre lojistas. |
+| `npm run test:browser` | Fluxos aprovados em Chromium, incluindo diagnóstico no painel, crédito, débito com 3DS simulado, multi-lojista e XLSX. |
+| `npm run test:debit:sandbox` | Interrompido antes da primeira requisição por ausência de `PAGARME_DEBIT_SANDBOX_KEY`. A aprovação e a recusa foram exercitadas com transporte simulado na suíte automatizada. |

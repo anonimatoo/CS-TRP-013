@@ -16,7 +16,8 @@
     "test:browser": "node tests/browser.mjs",
     "db:inspect": "node --env-file-if-exists=.env.local scripts/db.mjs inspect",
     "db:migrate": "node --env-file-if-exists=.env.local scripts/db.mjs migrate",
-    "verify:services": "node --env-file-if-exists=.env.local scripts/verify-services.mjs"
+    "verify:services": "node --env-file-if-exists=.env.local scripts/verify-services.mjs",
+    "test:debit:sandbox": "node --env-file-if-exists=.env.local scripts/debit-sandbox.mjs"
   },
   "dependencies": {
     "exceljs": "^4.4.0",

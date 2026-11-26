@@ -148,6 +148,8 @@ export async function fixture({ browser = false, port = 0, originOverride, allow
       return link ? output(link) : output({},404);
     }
     if (route.startsWith('/orders/')) return belongs(remote.orders.get(route.slice(8))) ? output(remote.orders.get(route.slice(8))) : output({},404);
+    if (route === '/hooks' && remote.diagnosticHooks && searchParams.get('size') === '10') return remote.diagnosticHooks(merchant);
+    if (route === '/charges' && remote.diagnosticCharges && searchParams.has('page')) return remote.diagnosticCharges(merchant);
     if (route === '/hooks') return output({ data: [{ account: { id: merchant } }] });
     if (route.startsWith('/hooks/')) return remote.hooks.get(route.slice(7))?.account?.id === merchant ? output(remote.hooks.get(route.slice(7))) : output({},404);
     if (route.startsWith('/charges/')) {
@@ -175,7 +177,7 @@ export async function fixture({ browser = false, port = 0, originOverride, allow
     ENCRYPTION_KEY: Buffer.alloc(32, 17).toString('base64'), WEBHOOK_SECRET: hookSecret, APP_ORIGIN: originOverride ?? origin, ALLOW_LIVE_PAYMENTS: String(allowLive), PAGARME_DEBIT_APPROVAL_TEST: 'sandbox-approved-reference', ...configOverrides
   });
   const createFixtureApp = () => createApp({ db, config, pagarme, viaFetch, mailTransport,
-    stoneFetch: async () => Response.json({ tds_token: 'fixture-3ds-token' }) });
+    stoneFetch: async () => remote.diagnostic3dsHttp ? Response.json({}, { status: remote.diagnostic3dsHttp }) : Response.json({ tds_token: 'fixture-3ds-token' }) });
   let app = createFixtureApp();
   const restart = () => { app = createFixtureApp(); };
   const serve = (req, res, next) => app(req, res, next);

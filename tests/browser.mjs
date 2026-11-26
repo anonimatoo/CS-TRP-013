@@ -56,6 +56,11 @@ try {
   await modal.getByRole('button', { name: 'TESTAR CONEXÃO' }).click();
   await modal.locator('[role=status]').getByText('Pagar.me respondeu às consultas autenticadas de leitura.').waitFor();
   assert.equal(await modal.getByLabel('Identificador da conta Pagar.me').count(), 0);
+  const debitDiagnostics = modal.getByRole('region', { name: 'Diagnóstico de cartão de débito' });
+  await debitDiagnostics.getByRole('button', { name: 'Executar diagnóstico' }).click();
+  await debitDiagnostics.getByText('Token emitido', { exact: true }).waitFor();
+  await debitDiagnostics.getByText('Requer confirmação com o provedor', { exact: true }).waitFor();
+  await debitDiagnostics.getByText('A amostra não contém operações de débito identificáveis.', { exact: true }).waitFor();
   async function configureCards() {
     await modal.getByLabel('Chave pública (PK) da conta').fill('pk_test_fixture123');
     await modal.getByRole('checkbox', { name: 'Ativar cartão de débito' }).check();

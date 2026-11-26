@@ -1,3 +1,4 @@
+import { diagnoseDebit } from './debit-diagnostics.mjs';
 import { addMerchant, defaultMerchant, merchantId, merchantRow, merchantWebhookSecret } from './merchants.mjs';
 import { makeNotifications, notificationFilter, reportFilter, sendWorkbook } from './notifications.mjs';
 import { cardAvailability, cardMethod, requires3ds, stoneToken } from './cards.mjs';
@@ -240,6 +241,10 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
     const id = res.locals.merchant.id;
     const webhookUrl = config.origin + '/api/hooks/pagarme/' + id + '/' + env + '/' + merchantWebhookSecret(config.webhookSecret, id, env);
     res.json({ ...await adminGateway(res).get(env), webhookUrl });
+  });
+  app.post('/api/admin/gateway/:env/debit-diagnostics', security.limit('debit-diagnostics', 12, 60), async (req, res) => {
+    const env = parse(environment, req.params.env, 'Ambiente inválido.');
+    res.json(await diagnoseDebit({ db, config, pagarme, stoneFetch, env, merchant: res.locals.merchant.id }));
   });
   app.post('/api/admin/gateway/:env/:action', security.limit('gateway', 25, 60), async (req, res) => {
     const env = parse(environment, req.params.env, 'Ambiente inválido.');
