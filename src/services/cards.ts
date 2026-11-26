@@ -1,4 +1,4 @@
-import { api, type CardMethod } from './api';
+import { api, merchantPath, storefrontMerchant, type CardMethod } from './api';
 
 type Card = { number: string; holder_name: string; exp_month: number; exp_year: number; cvv: string };
 type Buyer = { name: string; email: string; cpf: string; phone: string; cep: string; state: string;
@@ -41,11 +41,11 @@ function loadSdk(environment: 'test' | 'live') {
 }
 
 export async function authenticateCard(card: Card, buyer: Buyer, amount: number, environment: 'test' | 'live',
-  request: { method: CardMethod; version: number; gatewayVersion: number },
+  request: { method: CardMethod; merchantId?: string; version: number; gatewayVersion: number },
   methodContainer: HTMLElement, challengeContainer: HTMLElement): Promise<Authentication> {
   try {
     const sdk = await loadSdk(environment);
-    const { token } = await api<{ token: string }>('/checkout/3ds', { method: 'POST', body: request });
+    const { token } = await api<{ token: string }>(merchantPath('/checkout/3ds', storefrontMerchant()), { method: 'POST', body: request });
     const phone = buyer.phone.replace(/\D/g, '');
     const address = { country: buyer.country, state: buyer.state, city: buyer.city, zip_code: buyer.cep.replace(/\D/g, ''),
       line_1: [buyer.number, buyer.street, buyer.neighborhood].join(', '), line_2: buyer.complement };

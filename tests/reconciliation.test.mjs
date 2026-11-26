@@ -1,3 +1,4 @@
+import { defaultMerchant } from '../server/merchants.mjs';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
@@ -9,12 +10,12 @@ test('Pedidos hospedados anteriores continuam conciliáveis sem criar novos link
   t.after(app.close);
   const id = randomUUID();
   const linkId = 'pl_LegacyOrder';
-  await app.db.query(`UPDATE cs_trp_013_v2.gateway SET account=$1,secret=$2 WHERE environment='test'`,
-    [account, encrypt(Buffer.alloc(32, 17), firstKey, 'test:' + account)]);
-  await app.db.query('INSERT INTO cs_trp_013_v2.prices(version,amount) VALUES(2,299999)');
+  await app.db.query(`UPDATE cs_trp_013_v2.gateway SET account=$1,secret=$2 WHERE environment='test' AND merchant_id=$3`,
+    [account, encrypt(Buffer.alloc(32, 17), firstKey, 'test:' + account), defaultMerchant]);
+  await app.db.query('INSERT INTO cs_trp_013_v2.prices(version,amount,merchant_id) VALUES(2,299999,$1)', [defaultMerchant]);
   await app.db.query(`INSERT INTO cs_trp_013_v2.orders
-    (id,environment,account,price_version,amount,installments,product_name,status,hosted_checkout,payment_method,checkout_provider_id)
-    VALUES($1,'test',$2,2,299999,1,'PC Gamer','communication_error',true,'credit_card',$3)`, [id, account, linkId]);
+    (id,environment,account,price_version,amount,installments,product_name,status,hosted_checkout,payment_method,checkout_provider_id,merchant_id)
+    VALUES($1,'test',$2,2,299999,1,'PC Gamer','communication_error',true,'credit_card',$3,$4)`, [id, account, linkId, defaultMerchant]);
   app.remote.links.set(linkId, {
     id: linkId, name: 'CS TRP 013 ' + id, type: 'order', status: 'active',
     url: 'https://payment-link.stone.com.br/' + linkId,

@@ -1,3 +1,4 @@
+import { defaultMerchant } from '../server/merchants.mjs';
 import assert from 'node:assert/strict';
 import { randomUUID, randomBytes } from 'node:crypto';
 import test from 'node:test';
@@ -100,10 +101,10 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
     const savedKey = (await keyAction('add', { secret: firstKey, publicKey })).json;
     assert.equal(savedKey.hasKey, true);
     assert.equal(savedKey.publicKey, publicKey);
-    assert.equal('account' in savedKey, false);
+    assert.equal(savedKey.account, account);
     assert.equal(savedKey.enabled, false);
     assert.equal((await req('/checkout')).json.ready, false);
-    const raw = await app.db.query('SELECT secret FROM cs_trp_013_v2.gateway WHERE environment=$1', ['test']);
+    const raw = await app.db.query('SELECT secret FROM cs_trp_013_v2.gateway WHERE environment=$1 AND merchant_id=$2', ['test', defaultMerchant]);
     assert.notEqual(raw.rows[0].secret, firstKey);
     assert.equal((await keyAction('test')).json.http, 200);
     assert.equal(app.remote.linkPosts, 0);
@@ -172,9 +173,9 @@ test('API e persistência PostgreSQL local ao longo de todo o fluxo administrati
   });
 
   await t.test('substituição com rollback, chave nova em operação, captura e estorno', async () => {
-    const before = (await app.db.query('SELECT secret FROM cs_trp_013_v2.gateway WHERE environment=$1', ['test'])).rows[0].secret;
+    const before = (await app.db.query('SELECT secret FROM cs_trp_013_v2.gateway WHERE environment=$1 AND merchant_id=$2', ['test', defaultMerchant])).rows[0].secret;
     assert.equal((await keyAction('replace', { secret: wrongKey })).status, 422);
-    assert.equal((await app.db.query('SELECT secret FROM cs_trp_013_v2.gateway WHERE environment=$1', ['test'])).rows[0].secret, before);
+    assert.equal((await app.db.query('SELECT secret FROM cs_trp_013_v2.gateway WHERE environment=$1 AND merchant_id=$2', ['test', defaultMerchant])).rows[0].secret, before);
     const rotated = await keyAction('replace', { secret: secondKey, publicKey });
     assert.equal(rotated.status, 200);
     assert.equal(rotated.json.enabled, true);

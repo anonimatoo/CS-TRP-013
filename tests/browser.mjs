@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { chromium } from 'playwright';
-import { fixture, firstKey, liveKey, password, secondKey, wrongKey } from './fixture.mjs';
+import { fixture, firstKey, liveKey, otherKey, password, secondKey, wrongKey } from './fixture.mjs';
 
 const app = await fixture({ browser: true });
 let browser;
@@ -143,6 +143,34 @@ try {
   await modal.getByRole('checkbox', { name: /Confirmo a remoção/ }).check();
   await modal.getByRole('button', { name: 'Confirmar', exact: true }).click();
   await modal.getByText('Chave não cadastrada').waitFor();
+  const originalMerchant = await modal.getByRole('combobox', { name: 'Lojista', exact: true }).inputValue();
+  await modal.getByLabel('Nome do novo lojista').fill('Loja Praia');
+  await modal.getByRole('button', { name: 'Adicionar lojista' }).click();
+  const merchantPicker = modal.getByRole('combobox', { name: 'Lojista', exact: true });
+  await merchantPicker.locator('option', { hasText: 'Loja Praia' }).waitFor({ state: 'attached' });
+  const secondMerchant = await merchantPicker.locator('option', { hasText: 'Loja Praia' }).getAttribute('value');
+  assert.ok(secondMerchant && originalMerchant !== secondMerchant);
+  await secretField.fill(otherKey);
+  await modal.getByRole('button', { name: 'ADICIONAR CHAVE' }).click();
+  await modal.getByText('acc_OtherMerchant013', { exact: true }).waitFor();
+  await modal.getByRole('button', { name: 'Relatórios e Notificações' }).click();
+  await modal.getByLabel('Destinatários autorizados').fill('relatorios@example.test');
+  await modal.getByRole('checkbox', { name: 'Autorizar compartilhamento deste lojista' }).check();
+  await modal.getByRole('checkbox', { name: /Confirmo que o lojista autorizou/ }).check();
+  await modal.getByRole('button', { name: 'Salvar compartilhamento' }).click();
+  await modal.getByText('Compartilhamento atualizado.').waitFor();
+  const reportDownloaded = page.waitForEvent('download');
+  await modal.getByRole('link', { name: 'Baixar XLSX' }).click();
+  assert.match((await reportDownloaded).suggestedFilename(), /\.xlsx$/);
+  await modal.getByRole('checkbox', { name: 'Autorizar compartilhamento deste lojista' }).uncheck();
+  await modal.getByRole('button', { name: 'Salvar compartilhamento' }).click();
+  await modal.getByText('Compartilhamento atualizado.').waitFor();
+
+  await merchantPicker.selectOption({ label: 'Histórico sem titularidade verificada' });
+  await modal.getByText(/Histórico preservado para consulta/).waitFor();
+  assert.equal(await modal.getByRole('button', { name: 'Gateway', exact: true }).count(), 0);
+  await merchantPicker.selectOption(originalMerchant);
+  await modal.getByText('Chave não cadastrada').waitFor();
   await modal.getByRole('button', { name: 'SAIR' }).click();
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
   assert.equal(await finalizePayment.isDisabled(), true);
@@ -166,7 +194,7 @@ try {
   await page.keyboard.press('Escape');
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
   assert.deepEqual(errors, []);
-  console.log('Chromium: checkout, modal, autenticação, credenciais, crédito, débito e autenticação simulada, ViaCEP, saída e responsividade (1448/768/390/320 px).');
+  console.log('Chromium: checkout, modal, autenticação, credenciais, crédito, débito e autenticação simulada, ViaCEP, troca de lojista, autorização, download XLSX, saída e responsividade (1448/768/390/320 px).');
 } finally {
   await browser?.close();
   await app.close();

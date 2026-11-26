@@ -2,13 +2,14 @@ import { useEffect, useState } from 'react';
 import { Activity, CircleDot, KeyRound, Power, RefreshCw, Unlink } from 'lucide-react';
 import { pagarmeKeyEnvironment } from '../../shared/validation.mjs';
 import { Field, Loader } from '../components/UI';
-import { ApiError, api, dateTime, envLabel, explain, providerErrorLabel, type Environment, type Gateway as GatewayState, type Product } from '../services/api';
+import { ApiError, api, merchantPath, dateTime, envLabel, explain, providerErrorLabel, type Environment, type Gateway as GatewayState, type Product } from '../services/api';
 
 type Action = 'add' | 'replace' | 'test' | 'activate' | 'disable' | 'disconnect' | 'cards';
 type Pending = 'activate' | 'disconnect';
 
 interface Props {
   csrf: string;
+  merchant: string;
   env: Environment;
   product: Product | null;
   onCommercialSettings: () => void;
@@ -17,7 +18,7 @@ interface Props {
   onExpired: () => void;
 }
 
-export function Gateway({ csrf, env, product, onCommercialSettings, onEnvironmentChange, onChange, onExpired }: Props) {
+export function Gateway({ csrf, merchant, env, product, onCommercialSettings, onEnvironmentChange, onChange, onExpired }: Props) {
   const [configuration, setConfiguration] = useState<GatewayState>();
   const [retry, setRetry] = useState(0);
   const [cardSettings, setCardSettings] = useState({
@@ -49,7 +50,7 @@ export function Gateway({ csrf, env, product, onCommercialSettings, onEnvironmen
     setFeedback({ error: false, text: '' });
     setPending('');
     setConfirmed(false);
-    api<GatewayState>(path).then(result => {
+    api<GatewayState>(merchantPath(path, merchant)).then(result => {
       if (current) setConfiguration(result);
     }).catch(error => {
       if (!current) return;
@@ -60,7 +61,7 @@ export function Gateway({ csrf, env, product, onCommercialSettings, onEnvironmen
       if (current) setBusy('');
     });
     return () => { current = false; };
-  }, [path, retry]);
+  }, [path, retry, merchant]);
 
   function editKey(value: string) {
     setKey(value);
@@ -80,8 +81,8 @@ export function Gateway({ csrf, env, product, onCommercialSettings, onEnvironmen
     const body = keyAction ? { secret: key } : action === 'cards' ? cardSettings : { confirmed };
     if (keyAction) setKey('');
     try {
-      const result = await api<GatewayState>(path + '/' + action, { method: 'POST', csrf, body });
-      setConfiguration(result);
+      const result = await api<GatewayState>(merchantPath(path + '/' + action, merchant), { method: 'POST', csrf, body });
+      setConfiguration({ ...result, webhookUrl: gateway.webhookUrl });
       onChange();
       setPending('');
       setConfirmed(false);
@@ -123,6 +124,7 @@ export function Gateway({ csrf, env, product, onCommercialSettings, onEnvironmen
     </div>
     {gateway ? <>
       <dl className="gateway-facts">
+        <div><dt>Conta Pagar.me</dt><dd>{gateway.account ?? 'A verificar'}</dd></div>
         <div><dt>Chave cadastrada</dt><dd>{gateway.hasKey ? 'Sim' : 'Não'}</dd></div>
         <div><dt>Autenticação</dt><dd>{gateway.authenticated === null ? 'A verificar' : gateway.authenticated ? 'Confirmada' : 'Recusada'}</dd></div>
         <div><dt>Leitura de pedidos</dt><dd>{gateway.checkoutReadable === null ? 'A verificar' : gateway.checkoutReadable ? 'Confirmada' : 'Acesso recusado'}</dd></div>
@@ -131,6 +133,7 @@ export function Gateway({ csrf, env, product, onCommercialSettings, onEnvironmen
         <div><dt>Último teste</dt><dd>{dateTime(gateway.testedAt)}</dd></div>
         <div><dt>HTTP do teste de leitura</dt><dd>{gateway.http ?? '—'}</dd></div>
       </dl>
+      {gateway.webhookUrl && <details><summary>URL privada do webhook</summary><code className="wrap-url">{gateway.webhookUrl}</code></details>}
       {gateway.message && <p className="notice info">{gateway.message}</p>}
       {gateway.activationBlock && <p className="notice info">{gateway.activationBlock}</p>}
       {!gateway.activationBlock && gateway.connected && !gateway.enabled && <p className="notice info">Para liberar o pagamento em {envLabel(env)}, use <strong>ATIVAR GATEWAY</strong> e confirme.</p>}

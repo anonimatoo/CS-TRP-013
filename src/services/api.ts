@@ -1,7 +1,15 @@
 export type CardMethod = 'credit_card' | 'debit_card';
 export type Environment = 'test' | 'live';
 
+export interface Merchant { id: string; name: string; quarantined: boolean }
+export const storefrontMerchant = () => new URLSearchParams(window.location.search).get('lojista') ?? undefined;
+export function merchantPath(path: string, merchant?: string) {
+  if (!merchant) return path;
+  return path + (path.includes('?') ? '&' : '?') + 'lojista=' + encodeURIComponent(merchant);
+}
+
 export interface Product {
+  merchantId?: string;
   name: string;
   description: string;
   image: string;
@@ -37,6 +45,8 @@ export interface Receipt {
 }
 
 export interface Gateway {
+  account?: string | null;
+  webhookUrl?: string;
   environment: Environment;
   hasKey: boolean;
   publicKey: string | null;

@@ -1,15 +1,18 @@
+import { merchantId } from './merchants.mjs';
+import { enqueueCapture } from './notifications.mjs';
 import { cardAvailability, cardMethod, requires3ds } from './cards.mjs';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { digits, validCpf, states } from '../shared/validation.mjs';
 import { audit, one } from './db.mjs';
-import { gatewayRow, gatewaySecret } from './gateway.mjs';
+import { bindGatewayAccount, gatewayRow, gatewaySecret } from './gateway.mjs';
 import { hostedCheckoutName, hostedCheckoutUrl, inspectCheckoutUrl, ProviderError, providerId, readPayment } from './pagarme.mjs';
 import { HttpError } from './security.mjs';
 
 const required = (max) => z.string().trim().min(1).max(max).refine(value => !/[\u0000-\u001f\u007f]/.test(value));
 export const payment = z.object({
   id: z.uuid(), version: z.number().int().positive(), gatewayVersion: z.number().int().nonnegative(), installments: z.number().int().min(1).max(24),
+  merchantId: merchantId.optional(),
   method: cardMethod,
   cardToken: z.string().regex(/^token_[A-Za-z0-9_-]{4,120}$/).optional(),
   authentication: z.object({ status: z.enum(['Y','A','N','C','U','R','I','canceled','unavailable']),
@@ -24,8 +27,8 @@ export const payment = z.object({
   }).strict()
 }).strict();
 
-export const productRow = (db, lock = false) =>
-  one(db, 'SELECT * FROM cs_trp_013_v2.product WHERE id=1' + (lock ? ' FOR UPDATE' : ''));
+export const productRow = (db, merchant, lock = false) =>
+  one(db, 'SELECT * FROM cs_trp_013_v2.product WHERE id=1 AND merchant_id=$1' + (lock ? ' FOR UPDATE' : ''), [merchant]);
 
 const checkoutMinutes = 30;
 const activeHostedStatuses = ['processing','pending','communication_error','review','authorized','request_failed'];
@@ -102,7 +105,7 @@ export function publicOrder(row) {
     (row.reconciliation_state == null || ['checkout_found','checkout_found_order_unverified'].includes(row.reconciliation_state)) &&
     Date.parse(row.checkout_expires_at) > Date.now() ? hostedCheckoutUrl(row.checkout_url) : null;
   return {
-    id: row.id, method: row.payment_method, authenticationStatus: row.authentication_status, status: row.status, amount: row.amount, installments: row.installments, environment: row.environment,
+    id: row.id, merchantId: row.merchant_id, method: row.payment_method, authenticationStatus: row.authentication_status, status: row.status, amount: row.amount, installments: row.installments, environment: row.environment,
     http: row.http_status, refusalCode: row.refusal_code, providerStatus: row.provider_status, checkoutUrl,
     checkoutError: row.checkout_error ?? null,
     reconciliation: row.reconciliation_state ?? (row.status === 'communication_error' ? 'pending' : null),
@@ -178,9 +181,9 @@ function billingDetails(buyer) {
   };
 }
 
-export function makePayments(db, config, pagarme) {
+export function makePayments(db, config, pagarme, merchant) {
   const get = (id, connection = db, lock = false) =>
-    one(connection, 'SELECT * FROM cs_trp_013_v2.orders WHERE id=$1' + (lock ? ' FOR UPDATE' : ''), [id]);
+    one(connection, 'SELECT * FROM cs_trp_013_v2.orders WHERE id=$1 AND merchant_id=$2' + (lock ? ' FOR UPDATE' : ''), [id, merchant]);
 
   async function apply(client, id, providerOrder, snapshot, http) {
     const current = await get(id, client, true);
@@ -200,23 +203,27 @@ export function makePayments(db, config, pagarme) {
       provider_updated_at=COALESCE($9,provider_updated_at),actual_paid=COALESCE($10,actual_paid),
       authorized_amount=COALESCE($11,authorized_amount),provider_transaction=COALESCE($12,provider_transaction),
       reconciliation_state=CASE WHEN hosted_checkout THEN 'order_found' ELSE reconciliation_state END,
-      reconciliation_error=NULL,reconciliation_http=$5,reconciliation_diagnostics=NULL,reconciliation_at=now(),updated_at=now()
-      WHERE id=$1 RETURNING *`,
+      reconciliation_error=NULL,reconciliation_http=$5,reconciliation_diagnostics=NULL,reconciliation_at=now(),updated_at=now(),
+      card_brand=COALESCE($14,card_brand), fee_amount=COALESCE($15,fee_amount),
+      net_amount=COALESCE($16,net_amount), confirmed_at=COALESCE(confirmed_at,$17), account=COALESCE(account,$18)
+      WHERE id=$1 AND merchant_id=$13 RETURNING *`,
     [id, providerOrder, snapshot.chargeId, snapshot.status, http, snapshot.refusalCode,
-      snapshot.refusalReason, snapshot.providerStatus, snapshot.updatedAt, snapshot.paid, snapshot.authorized, snapshot.transactionId]);
+      snapshot.refusalReason, snapshot.providerStatus, snapshot.updatedAt, snapshot.paid, snapshot.authorized, snapshot.transactionId, merchant, snapshot.brand, snapshot.fee, snapshot.net,
+      snapshot.captured ? snapshot.updatedAt ?? new Date() : null, snapshot.verifiedAccount ?? null]);
     const latest = await one(client, `SELECT provider_id,status FROM cs_trp_013_v2.transactions
-      WHERE order_id=$1 ORDER BY id DESC LIMIT 1`, [id]);
+      WHERE order_id=$1 AND merchant_id=$2 ORDER BY id DESC LIMIT 1`, [id, merchant]);
     if (latest?.status !== row.status || latest?.provider_id !== snapshot.transactionId) {
       await client.query(`INSERT INTO cs_trp_013_v2.transactions(order_id,provider_id,status,payment_method,authorized_amount,
-        authentication_status,refusal_code,refusal_reason) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        authentication_status,refusal_code,refusal_reason,merchant_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
         [id, snapshot.transactionId, row.status, row.payment_method, row.authorized_amount,
-          row.authentication_status, row.refusal_code, row.refusal_reason]);
+          row.authentication_status, row.refusal_code, row.refusal_reason, merchant]);
     }
-    const action = await one(client, 'SELECT action FROM cs_trp_013_v2.payment_actions WHERE order_id=$1', [id]);
+    const action = await one(client, 'SELECT action FROM cs_trp_013_v2.payment_actions WHERE order_id=$1 AND merchant_id=$2', [id, merchant]);
     const completed = action?.action === 'capture' ? ['paid','captured'] : ['canceled','refunded','chargedback'];
     if (action && completed.includes(row.status)) {
-      await client.query('DELETE FROM cs_trp_013_v2.payment_actions WHERE order_id=$1', [id]);
+      await client.query('DELETE FROM cs_trp_013_v2.payment_actions WHERE order_id=$1 AND merchant_id=$2', [id, merchant]);
     }
+    if (!current.confirmed_at) await enqueueCapture(client, config, row, snapshot);
     return row;
   }
 
@@ -224,10 +231,10 @@ export function makePayments(db, config, pagarme) {
     return db.tx(async client => {
       const previous = await get(input.id, client);
       if (previous) return { row: previous };
-      const product = await productRow(client, true);
+      const product = await productRow(client, merchant, true);
       const afterLock = await get(input.id, client);
       if (afterLock) return { row: afterLock };
-      const gateway = await gatewayRow(client, product.environment, true);
+      const gateway = await gatewayRow(client, merchant, product.environment, true);
       if (!product.enabled || !product.amount || !gateway.enabled || !gateway.last_ok || !gateway.secret ||
           (gateway.environment === 'live' && !config.allowLive)) {
         throw new HttpError(503, 'Pagamento indisponível no momento.', { safeToRetry: true });
@@ -250,17 +257,20 @@ export function makePayments(db, config, pagarme) {
         throw new HttpError(422, 'O parcelamento selecionado não está disponível.', { safeToRetry: true });
       }
       const row = await one(client, `INSERT INTO cs_trp_013_v2.orders
-        (id,environment,account,price_version,amount,installments,product_name,status,payment_method,authentication_status,checkout_attempted_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now()) ON CONFLICT DO NOTHING RETURNING *`,
+        (id,environment,account,price_version,amount,installments,product_name,status,payment_method,authentication_status,checkout_attempted_at,merchant_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),$11) ON CONFLICT DO NOTHING RETURNING *`,
       [input.id, gateway.environment, gateway.account, product.version, product.amount, input.installments, product.name,
         incomplete ? 'authentication_incomplete' : 'processing', input.method,
-        needs3ds ? input.authentication.status : null]);
+        needs3ds ? input.authentication.status : null, merchant]);
       if (row && incomplete) {
-        await client.query(`INSERT INTO cs_trp_013_v2.transactions(order_id,status,payment_method,authentication_status)
-          VALUES ($1,$2,$3,$4)`, [row.id, row.status, row.payment_method, row.authentication_status]);
+        await client.query(`INSERT INTO cs_trp_013_v2.transactions(order_id,status,payment_method,authentication_status,merchant_id)
+          VALUES ($1,$2,$3,$4,$5)`, [row.id, row.status, row.payment_method, row.authentication_status, merchant]);
         return { row };
       }
-      return row ? { row, product, gateway } : { row: await get(input.id, client) };
+      if (row) return { row, product, gateway };
+      const existing = await get(input.id, client);
+      if (!existing) throw new HttpError(409, 'Referência indisponível neste checkout.', { safeToRetry: true });
+      return { row: existing };
     });
   }
 
@@ -278,11 +288,11 @@ export function makePayments(db, config, pagarme) {
     if (!id || row.checkout_provider_id) return row;
     try {
       const updated = await one(db, `UPDATE cs_trp_013_v2.orders SET checkout_provider_id=$2,updated_at=now()
-        WHERE id=$1 AND checkout_provider_id IS NULL RETURNING *`, [row.id, id]);
+        WHERE id=$1 AND merchant_id=$3 AND checkout_provider_id IS NULL RETURNING *`, [row.id, id, merchant]);
       const stored = updated ?? await get(row.id);
       if (stored.checkout_provider_id === id) return { ...row, checkout_provider_id: id };
     } catch (error) {
-      if (error.code !== '23505' || error.constraint !== 'orders_checkout_provider_id_key') throw error;
+      if (error.code !== '23505' || error.constraint !== 'orders_merchant_env_checkout_key') throw error;
     }
     throw responseError(operation, result, 'checkout_id_conflict', 'checkout_reference_ambiguous');
   }
@@ -303,11 +313,11 @@ export function makePayments(db, config, pagarme) {
       checkout_http=COALESCE($8,checkout_http),
       checkout_synced_at=CASE WHEN checkout_url IS NULL AND $7::text='checkout_found' THEN NULL ELSE checkout_synced_at END,
       reconciliation_error=$11,reconciliation_http=$10,reconciliation_diagnostics=$12::jsonb,reconciliation_at=now(),updated_at=now()
-      WHERE id=$1 AND (checkout_provider_id IS NULL OR checkout_provider_id=$2)
+      WHERE id=$1 AND merchant_id=$13 AND (checkout_provider_id IS NULL OR checkout_provider_id=$2)
       AND provider_order IS NULL AND provider_charge IS NULL
       AND (reconciliation_at IS NULL OR reconciliation_at <= $9) RETURNING *`,
     [row.id, link.id, available ? link.url : null, link.expires, status, creationHttp ?? result.http, state, creationHttp,
-      row.reconcileStartedAt ?? row.checkout_attempted_at, orderError?.http ?? result.http, orderError?.category ?? null, diagnostics])
+      row.reconcileStartedAt ?? row.checkout_attempted_at, orderError?.http ?? result.http, orderError?.category ?? null, diagnostics, merchant])
       ?? await get(row.id);
   }
 
@@ -332,8 +342,8 @@ export function makePayments(db, config, pagarme) {
   async function recordCreation(gateway, row, http, error = null) {
     await db.query(`UPDATE cs_trp_013_v2.gateway SET checkout_attempted_at=$3,checkout_http=$4,checkout_error=$5,
       checkout_creation_verified_at=CASE WHEN $5::text IS NULL THEN $3 ELSE checkout_creation_verified_at END
-      WHERE environment=$1 AND secret=$2 AND (checkout_attempted_at IS NULL OR checkout_attempted_at <= $3)`,
-    [gateway.environment, gateway.secret, row.checkout_attempted_at, http, error]);
+      WHERE environment=$1 AND merchant_id=$6 AND secret=$2 AND (checkout_attempted_at IS NULL OR checkout_attempted_at <= $3)`,
+    [gateway.environment, gateway.secret, row.checkout_attempted_at, http, error, merchant]);
   }
 
   async function submit(input) {
@@ -373,13 +383,13 @@ export function makePayments(db, config, pagarme) {
         checkout_http=$3,checkout_error=$4,checkout_diagnostic=$6::jsonb,
         checkout_attempted_at=COALESCE(checkout_attempted_at,now()),
         reconciliation_state=CASE WHEN reconciliation_at IS NULL THEN $5 ELSE reconciliation_state END,updated_at=now()
-        WHERE id=$1 RETURNING *`,
+        WHERE id=$1 AND merchant_id=$7 RETURNING *`,
       [row.id, rejected ? 'request_failed' : 'communication_error', recordedHttp, error.category, rejected ? 'rejected' : 'pending',
-        JSON.stringify(diagnostic)])
+        JSON.stringify(diagnostic), merchant])
         ?? await get(row.id);
       if (rejected && saved.status === 'request_failed') {
-        await db.query(`INSERT INTO cs_trp_013_v2.transactions(order_id,status,payment_method,authentication_status)
-          VALUES ($1,$2,$3,$4)`, [row.id, saved.status, row.payment_method, row.authentication_status]);
+        await db.query(`INSERT INTO cs_trp_013_v2.transactions(order_id,status,payment_method,authentication_status,merchant_id)
+          VALUES ($1,$2,$3,$4,$5)`, [row.id, saved.status, row.payment_method, row.authentication_status, merchant]);
       }
       await recordCreation(gateway, row, recordedHttp, error.category);
       return saved;
@@ -395,7 +405,7 @@ export function makePayments(db, config, pagarme) {
   }
 
   async function keyFor(row) {
-    const gateway = await gatewayRow(db, row.environment);
+    const gateway = await gatewayRow(db, merchant, row.environment);
     if (!gateway.secret || (row.account && gateway.account !== row.account)) {
       throw new HttpError(409, 'Reconecte uma credencial da conta associada ao pedido.');
     }
@@ -442,8 +452,8 @@ export function makePayments(db, config, pagarme) {
         AND ($7 OR reconciliation_state IS NULL OR reconciliation_state IN ('pending','checkout_found_order_unverified') OR
           (reconciliation_state='checkout_found' AND checkout_expires_at<=now())) THEN $5 ELSE reconciliation_state END,
       reconciliation_error=$2,reconciliation_http=$3,reconciliation_diagnostics=$6::jsonb,reconciliation_at=now()
-      WHERE id=$1 AND (reconciliation_at IS NULL OR reconciliation_at <= $4) RETURNING *`,
-    [row.id, error, http, row.reconcileStartedAt, state, diagnostics.length ? JSON.stringify(diagnostics) : null, blockCheckout])
+      WHERE id=$1 AND merchant_id=$8 AND (reconciliation_at IS NULL OR reconciliation_at <= $4) RETURNING *`,
+    [row.id, error, http, row.reconcileStartedAt, state, diagnostics.length ? JSON.stringify(diagnostics) : null, blockCheckout, merchant])
       ?? await get(row.id);
   }
 
@@ -495,12 +505,12 @@ export function makePayments(db, config, pagarme) {
         row.reconciliation_state === 'rejected') return row;
     if (row.status === 'processing' && Date.now() - Date.parse(row.created_at) < 20000) return row;
     const claimed = await one(db, `UPDATE cs_trp_013_v2.orders SET checkout_synced_at=now()
-      WHERE id=$1 AND (checkout_synced_at IS NULL OR checkout_synced_at < now()-interval '30 seconds')
-      RETURNING *`, [row.id]);
+      WHERE id=$1 AND merchant_id=$2 AND (checkout_synced_at IS NULL OR checkout_synced_at < now()-interval '30 seconds')
+      RETURNING *`, [row.id, merchant]);
     return claimed ? refresh(claimed, { background: true }) : get(row.id);
   }
 
-  async function applyProviderOrder(row, result) {
+  async function applyProviderOrder(row, result, verifiedAccount) {
     const { data, operation = 'GET /orders/{id}' } = result;
     const id = providerId(data?.id, 'or');
     if (!id || (row.provider_order && id !== row.provider_order) || data.code !== row.id) {
@@ -518,6 +528,7 @@ export function makePayments(db, config, pagarme) {
       throw responseError(operation, result, 'payment_method', 'order_reference_mismatch');
     }
     const snapshot = readPayment(charge, data.status);
+    snapshot.verifiedAccount = verifiedAccount;
     if (charge && !snapshot.chargeId) throw responseError(operation, result, 'charge_id', 'order_reference_mismatch');
     if (!snapshot.updatedAt && Number.isFinite(Date.parse(data.updated_at))) snapshot.updatedAt = new Date(data.updated_at);
     return db.tx(client => apply(client, row.id, id, snapshot, result.http));
@@ -570,11 +581,11 @@ export function makePayments(db, config, pagarme) {
     const operation = await db.tx(async client => {
       const current = await get(row.id, client, true);
       if (!statuses.includes(current.status)) throw new HttpError(409, 'O estado da cobrança mudou.');
-      const pending = await one(client, 'SELECT action FROM cs_trp_013_v2.payment_actions WHERE order_id=$1 LIMIT 1', [row.id]);
+      const pending = await one(client, 'SELECT action FROM cs_trp_013_v2.payment_actions WHERE order_id=$1 AND merchant_id=$2 LIMIT 1', [row.id, merchant]);
       if (pending) throw new HttpError(409, 'Há uma operação já enviada. Atualize a cobrança e concilie no painel da Pagar.me.');
       const requestId = randomUUID();
-      await client.query('INSERT INTO cs_trp_013_v2.payment_actions(order_id,action,request_id) VALUES ($1,$2,$3)', [row.id, action, requestId]);
-      await audit(client, 'payments.' + action, { id: row.id });
+      await client.query('INSERT INTO cs_trp_013_v2.payment_actions(order_id,action,request_id,merchant_id) VALUES ($1,$2,$3,$4)', [row.id, action, requestId, merchant]);
+      await audit(client, 'payments.' + action, { id: row.id }, merchant);
       return requestId;
     });
     const path = '/charges/' + row.provider_charge;
@@ -586,7 +597,7 @@ export function makePayments(db, config, pagarme) {
     return db.tx(client => apply(client, row.id, row.provider_order, snapshot, result.http));
   }
 
-  async function hook(event) {
+  async function hook(event, environment) {
     const eventId = providerId(event?.id, 'hook');
     const kind = event?.type ?? event?.event ?? '';
     if (!eventId || typeof kind !== 'string' || !/^(order|charge)\.[a-z_]{1,50}$/.test(kind)) return;
@@ -595,26 +606,55 @@ export function makePayments(db, config, pagarme) {
     const localId = isOrder ? event.data?.code : event.data?.order?.code;
     const lookup = z.uuid().safeParse(localId);
     if (!remoteId) return;
-    let row = await one(db, `SELECT * FROM cs_trp_013_v2.orders WHERE ${isOrder ? 'provider_order' : 'provider_charge'}=$1`, [remoteId]);
-    if (!row && lookup.success) row = await get(lookup.data);
+    let row;
+    if (lookup.success) row = await get(lookup.data);
+    else {
+      const { rows } = await db.query(`SELECT * FROM cs_trp_013_v2.orders
+        WHERE merchant_id=$1 AND ($2::text IS NULL OR environment=$2)
+        AND ${isOrder ? 'provider_order' : 'provider_charge'}=$3 LIMIT 2`,
+      [merchant, environment ?? null, remoteId]);
+      if (rows.length !== 1) return;
+      [row] = rows;
+    }
     const account = providerId(event.account?.id, 'acc');
-    if (!row || !account || (row.account && row.account !== account)) return;
-    if (await one(db, 'SELECT id FROM cs_trp_013_v2.webhook_events WHERE id=$1', [eventId])) return;
-    const key = await keyFor(row);
+    if (!row || !account || (environment && row.environment !== environment) || (row.account && row.account !== account)) return;
+    const expectedId = isOrder ? row.provider_order : row.provider_charge;
+    if (expectedId && expectedId !== remoteId) throw new HttpError(403, 'Evento não corresponde ao pedido.');
+    const gateway = await gatewayRow(db, merchant, row.environment);
+    if (gateway.account && gateway.account !== account) return;
+    if (await one(db, 'SELECT id FROM cs_trp_013_v2.webhook_events WHERE id=$1 AND merchant_id=$2 AND environment=$3',
+      [eventId, merchant, row.environment])) return;
+    if (!gateway.secret || (row.account && row.account !== gateway.account)) {
+      throw new HttpError(409, 'Reconecte uma credencial da conta associada ao pedido.');
+    }
+    const key = paymentSecret(gateway);
     const auth = await pagarme(key, '/hooks/' + eventId);
     const verified = auth.data;
     if (verified?.id !== eventId || (verified.type ?? verified.event) !== kind ||
         verified.account?.id !== account || verified.data?.id !== remoteId) {
       throw new HttpError(403, 'Evento não confirmado pela Pagar.me.');
     }
-    const result = isOrder
-      ? await applyProviderOrder(row, await pagarme(key, '/orders/' + remoteId))
-      : await refresh(row);
+    await bindGatewayAccount(db, config, gateway, account);
+    let result;
+    if (isOrder) result = await applyProviderOrder(row, await pagarme(key, '/orders/' + remoteId), account);
+    else if (row.provider_charge) {
+      const charge = await pagarme(key, '/charges/' + remoteId);
+      if (charge.data?.id !== remoteId || charge.data?.amount !== row.amount) {
+        throw new HttpError(409, 'A cobrança não corresponde ao pedido.');
+      }
+      const snapshot = readPayment(charge.data);
+      snapshot.verifiedAccount = account;
+      result = await db.tx(client => apply(client, row.id, row.provider_order, snapshot, charge.http));
+    } else {
+      const order = await findProviderOrder(key, row, AbortSignal.timeout(22000));
+      if (order.data?.charges?.[0]?.id !== remoteId) throw new HttpError(409, 'A cobrança ainda não está disponível.');
+      result = await applyProviderOrder(row, order, account);
+    }
     if (!result.provider_order || (isOrder ? result.provider_order !== remoteId : result.provider_charge !== remoteId)) {
       throw new HttpError(409, 'O pedido ainda não está disponível para conciliação.');
     }
-    await db.query(`INSERT INTO cs_trp_013_v2.webhook_events(id,type,order_id) VALUES ($1,$2,$3)
-      ON CONFLICT DO NOTHING`, [eventId, kind, row.id]);
+    await db.query(`INSERT INTO cs_trp_013_v2.webhook_events(id,type,order_id,merchant_id,environment) VALUES ($1,$2,$3,$4,$5)
+      ON CONFLICT DO NOTHING`, [eventId, kind, row.id, merchant, row.environment]);
   }
 
   return { submit, get, status, refresh, operate, hook };

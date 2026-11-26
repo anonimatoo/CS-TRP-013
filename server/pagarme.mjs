@@ -124,7 +124,13 @@ export function readPayment(charge, orderStatus) {
   else if (orderStatus === 'canceled' && !chargeStatus) status = 'canceled';
   const refusalCode = transaction?.acquirer_return_code ?? transaction?.gateway_response?.code;
   const date = Math.max(...[charge?.updated_at, transaction?.updated_at].map(Date.parse).filter(Number.isFinite));
+  const cents = value => Number.isSafeInteger(value) && value >= 0 && value <= 2147483647 ? value : null;
+  const brand = transaction?.card?.brand ?? transaction?.network_token?.brand;
+  const captured = chargeStatus === 'paid' && transactionStatus === 'captured' &&
+    charge.paid_amount === charge.amount && cents(charge.paid_amount) > 0 && transaction?.success !== false;
   return {
+    captured, brand: typeof brand === 'string' && /^[A-Za-z][A-Za-z0-9 -]{0,30}$/.test(brand) ? brand : null,
+    fee: cents(charge?.fee_amount), net: cents(charge?.net_amount),
     status, providerStatus: paymentStatuses.has(gatewayStatus) ? gatewayStatus : null,
     chargeId: providerId(charge?.id, 'ch'),
     transactionId: providerId(transaction?.id, 'tran'),

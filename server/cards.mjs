@@ -1,14 +1,19 @@
+import { defaultMerchant } from './merchants.mjs';
 import { z } from 'zod';
 import { ProviderError } from './pagarme.mjs';
 
 export const cardMethod = z.enum(['credit_card','debit_card']);
 export const publicKeyPattern = /^pk_(?:test_)?[A-Za-z0-9_-]{8,150}$/;
 
+export const debitApproval = (config, row) => row.merchant_id === defaultMerchant
+  ? config.debitApproval?.[row.environment]
+  : config.merchantDebitApprovals?.[row.merchant_id]?.[row.environment];
+
 export function cardAvailability(row, config) {
   return {
     credit_card: Boolean(row.public_key && row.credit_enabled),
     debit_card: Boolean(row.public_key && row.debit_enabled && row.debit_authorization_reference &&
-      row.debit_authorization_reference === config.debitApproval?.[row.environment])
+      row.debit_authorization_reference === debitApproval(config, row))
   };
 }
 

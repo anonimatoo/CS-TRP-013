@@ -2,7 +2,7 @@ import { authenticateCard, tokenizeCard } from '../services/cards';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { BadgeCheck, Barcode, Check, CreditCard, Hash, Headset, Info, Laptop, LockKeyhole, Mail, MapPin, Phone, Search, Settings, ShieldCheck, Truck, UserRound } from 'lucide-react';
 import { digits, states, validCpf } from '../../shared/validation.mjs';
-import { ApiError, api, brl, explain, providerErrorLabel, statusLabel, type CardMethod, type Product, type Receipt } from '../services/api';
+import { ApiError, api, merchantPath, storefrontMerchant, brl, explain, providerErrorLabel, statusLabel, type CardMethod, type Product, type Receipt } from '../services/api';
 import { Field, Loader, SectionHeading } from '../components/UI';
 
 const defaultProduct = {
@@ -10,7 +10,7 @@ const defaultProduct = {
   maxInstallments: 1, ready: false, environment: 'test', operation: 'auth_and_capture', enabled: false, version: 0
 } satisfies Product;
 const emptyBuyer = { name: '', cpf: '', email: '', phone: '', cep: '', street: '', number: '', complement: '', neighborhood: '', city: '', state: '', country: 'BR' };
-const receiptKey = 'cs013.receipt';
+const receiptKey = 'cs013.receipt' + (storefrontMerchant() ? '.' + storefrontMerchant() : '');
 const orderReference = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 
 function receiptStorage(id?: string) {
@@ -95,7 +95,7 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
       if (syncing) return;
       syncing = true;
       try {
-        const result = await api<Receipt>('/orders/' + lastId);
+        const result = await api<Receipt>(merchantPath('/orders/' + lastId, storefrontMerchant()));
         if (active) {
           setReceipt(result);
           setMissing(false);
@@ -174,7 +174,7 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
     setBusy(true);
     let id = '';
     try {
-      const request = { method, version: shop.version, gatewayVersion: shop.gatewayVersion };
+      const request = { method, merchantId: shop.merchantId, version: shop.version, gatewayVersion: shop.gatewayVersion };
       const authentication = shop.requires3ds?.[method]
         ? await authenticateCard(card, buyer, shop.amount, shop.environment, request, methodContainer.current!, challengeContainer.current!)
         : undefined;
@@ -187,7 +187,7 @@ export function Checkout({ onAdmin, product, loadError, refresh }: {
       setLastId(id);
       setMissing(false);
       setStatusError(false);
-      const result = await api<Receipt>('/orders', { method: 'POST', body: {
+      const result = await api<Receipt>(merchantPath('/orders', storefrontMerchant()), { method: 'POST', body: {
         id, ...request, installments: method === 'debit_card' ? 1 : Math.min(installments, count), buyer, cardToken, authentication
       } });
       setReceipt(result);
