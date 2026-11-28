@@ -128,8 +128,16 @@ export function readPayment(charge, orderStatus) {
   const brand = transaction?.card?.brand ?? transaction?.network_token?.brand;
   const captured = chargeStatus === 'paid' && transactionStatus === 'captured' &&
     charge.paid_amount === charge.amount && cents(charge.paid_amount) > 0 && transaction?.success !== false;
+  const method = charge?.payment_method;
+  const installments = transaction?.installments;
+  const paidAt = Date.parse(charge?.paid_at);
+  const telegramPayment = captured ? {
+    method: ['credit_card','debit_card'].includes(method) ? method : null,
+    installments: method === 'debit_card' ? 1 : Number.isInteger(installments) && installments >= 1 && installments <= 24 ? installments : null,
+    at: Number.isFinite(paidAt) ? new Date(paidAt) : Number.isFinite(date) ? new Date(date) : null
+  } : null;
   return {
-    captured, brand: typeof brand === 'string' && /^[A-Za-z][A-Za-z0-9 -]{0,30}$/.test(brand) ? brand : null,
+    telegramPayment, captured, brand: typeof brand === 'string' && /^[A-Za-z][A-Za-z0-9 -]{0,30}$/.test(brand) ? brand : null,
     fee: cents(charge?.fee_amount), net: cents(charge?.net_amount),
     status, providerStatus: paymentStatuses.has(gatewayStatus) ? gatewayStatus : null,
     chargeId: providerId(charge?.id, 'ch'),

@@ -176,6 +176,12 @@ try {
   assert.equal(await modal.getByRole('button', { name: 'Gateway', exact: true }).count(), 0);
   await merchantPicker.selectOption(originalMerchant);
   await modal.getByText('Chave não cadastrada').waitFor();
+  await modal.getByRole('button', { name: 'Telegram Monitor', exact: true }).click();
+  const telegram = modal.getByRole('region', { name: 'Telegram Monitor' });
+  await telegram.getByText('Sem notificações registradas.', { exact: true }).waitFor();
+  assert.equal(await telegram.getByLabel('Token do bot').getAttribute('type'), 'password');
+  assert.equal(await telegram.getByLabel('Chat ID').getAttribute('type'), 'password');
+  assert.equal(await telegram.getByRole('button', { name: 'Enviar notificação de teste' }).isEnabled(), false);
   await modal.getByRole('button', { name: 'SAIR' }).click();
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
   assert.equal(await finalizePayment.isDisabled(), true);
@@ -199,7 +205,7 @@ try {
   await page.keyboard.press('Escape');
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
   assert.deepEqual(errors, []);
-  console.log('Chromium: checkout, modal, autenticação, credenciais, crédito, débito e autenticação simulada, ViaCEP, troca de lojista, autorização, download XLSX, saída e responsividade (1448/768/390/320 px).');
+  console.log('Chromium: checkout, modal, autenticação, credenciais, crédito, débito e autenticação simulada, ViaCEP, troca de lojista, autorização, download XLSX, Telegram Monitor, saída e responsividade (1448/768/390/320 px).');
 } finally {
   await browser?.close();
   await app.close();

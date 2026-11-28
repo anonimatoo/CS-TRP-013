@@ -205,11 +205,13 @@ export function makePayments(db, config, pagarme, merchant) {
       reconciliation_state=CASE WHEN hosted_checkout THEN 'order_found' ELSE reconciliation_state END,
       reconciliation_error=NULL,reconciliation_http=$5,reconciliation_diagnostics=NULL,reconciliation_at=now(),updated_at=now(),
       card_brand=COALESCE($14,card_brand), fee_amount=COALESCE($15,fee_amount),
-      net_amount=COALESCE($16,net_amount), confirmed_at=COALESCE(confirmed_at,$17), account=COALESCE(account,$18)
+      net_amount=COALESCE($16,net_amount), confirmed_at=COALESCE(confirmed_at,$17), account=COALESCE(account,$18),
+      telegram_payment=CASE WHEN confirmed_at IS NULL THEN $19::jsonb ELSE telegram_payment END
       WHERE id=$1 AND merchant_id=$13 RETURNING *`,
     [id, providerOrder, snapshot.chargeId, snapshot.status, http, snapshot.refusalCode,
       snapshot.refusalReason, snapshot.providerStatus, snapshot.updatedAt, snapshot.paid, snapshot.authorized, snapshot.transactionId, merchant, snapshot.brand, snapshot.fee, snapshot.net,
-      snapshot.captured ? snapshot.updatedAt ?? new Date() : null, snapshot.verifiedAccount ?? null]);
+      snapshot.captured ? snapshot.updatedAt ?? new Date() : null, snapshot.verifiedAccount ?? null,
+      current.environment === 'live' && snapshot.telegramPayment ? JSON.stringify(snapshot.telegramPayment) : null]);
     const latest = await one(client, `SELECT provider_id,status FROM cs_trp_013_v2.transactions
       WHERE order_id=$1 AND merchant_id=$2 ORDER BY id DESC LIMIT 1`, [id, merchant]);
     if (latest?.status !== row.status || latest?.provider_id !== snapshot.transactionId) {

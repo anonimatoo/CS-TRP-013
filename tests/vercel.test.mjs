@@ -41,6 +41,7 @@ test('Vercel envia rotas aninhadas ao Express nos dois formatos de URL', async t
 
 test('O cron Vercel fica no nível do projeto e preserva os cabeçalhos das rotas', async () => {
   const config = JSON.parse(await readFile(new URL('../vercel.json', import.meta.url), 'utf8'));
+  assert.equal(config.git.deploymentEnabled['codex/cs-trp-013-telegram-monitor'], false);
   assert.deepEqual(config.crons, [{ path: '/api/jobs/notifications', schedule: '* * * * *' }]);
   assert.ok(config.headers.every(rule => rule.headers.length > 0 && !Object.hasOwn(rule, 'crons')));
   assert.equal(config.git.deploymentEnabled['codex/cs-trp-013-multi-lojista'], false);

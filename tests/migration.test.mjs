@@ -8,7 +8,7 @@ import { migrate } from '../scripts/db.mjs';
 import { encrypt, decrypt } from '../server/security.mjs';
 import { firstKey } from './fixture.mjs';
 
-test('Migrações 003 a 007 mantêm checkout, preço e credencial protegida de uma base 002', async t => {
+test('Migrações 003 a 008 mantêm checkout, preço e credencial protegida de uma base 002', async t => {
   const pg = new PGlite();
   t.after(() => pg.close());
   const adapter = client => ({
@@ -61,4 +61,6 @@ test('Migrações 003 a 007 mantêm checkout, preço e credencial protegida de u
   assert.equal(gateway.enabled, true);
   assert.equal(gateway.debit_enabled, false);
   assert.equal(gateway.checkout_creation_verified_at, null);
+  assert.equal(order.telegram_payment, null);
+  assert.equal((await pg.query('SELECT count(*)::int AS count FROM cs_trp_013_v2.telegram_outbox')).rows[0].count, 0);
 });

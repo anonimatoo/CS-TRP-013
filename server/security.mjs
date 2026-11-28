@@ -38,6 +38,8 @@ export function configFromEnv(env = process.env) {
     allowLive: env.ALLOW_LIVE_PAYMENTS === 'true',
     debitApproval: { test: env.PAGARME_DEBIT_APPROVAL_TEST, live: env.PAGARME_DEBIT_APPROVAL_LIVE },
     merchantDebitApprovals,
+    telegram: { enabled: env.TELEGRAM_NOTIFICATIONS_ENABLED === 'true',
+      token: env.TELEGRAM_BOT_TOKEN || '', chatId: env.TELEGRAM_CHAT_ID || '' },
     notifications: { enabled: env.EMAIL_REPORT_ENABLED === 'true', onCapture: env.EMAIL_REPORT_ON_CAPTURE === 'true',
       suggestedRecipient: env.EMAIL_REPORT_RECIPIENT || '', cronSecret: env.CRON_SECRET || '',
       smtp: { host: env.SMTP_HOST || '', port: smtpPort, secure: env.SMTP_SECURE === 'true',

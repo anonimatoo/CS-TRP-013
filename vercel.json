@@ -1,7 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "vite",
-  "git": { "deploymentEnabled": { "codex/cs-trp-013-checkout": false, "codex/cs-trp-013-cartoes": false, "codex/cs-trp-013-multi-lojista": false } },
+  "git": { "deploymentEnabled": { "codex/cs-trp-013-checkout": false, "codex/cs-trp-013-cartoes": false, "codex/cs-trp-013-multi-lojista": false, "codex/cs-trp-013-telegram-monitor": false } },
   "installCommand": "npm ci",
   "buildCommand": "npm run build",
   "outputDirectory": "dist",

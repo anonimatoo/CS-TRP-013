@@ -13,6 +13,7 @@ export const password = 'SenhaUnitaria-013!';
 export const hookSecret = 'chave_de_teste_webhook_exclusivamente_local';
 export const firstKey = 'sk_test_local_013_credencial_a';
 export const secondKey = 'sk_test_local_013_credencial_b';
+export const secondLiveKey = 'sk_local_013_producao_b';
 export const liveKey = 'sk_local_013_producao_a';
 export const wrongKey = 'sk_test_recusada_credencial_x';
 export const account = 'acc_TestMerchant013';
@@ -20,7 +21,7 @@ export const otherKey = 'sk_test_local_013_outro_lojista';
 export const otherLiveKey = 'sk_local_013_outro_lojista';
 export const otherAccount = 'acc_OtherMerchant013';
 
-export async function fixture({ browser = false, port = 0, originOverride, allowLive = false, configOverrides = {}, mailTransport, postgresUrl } = {}) {
+export async function fixture({ browser = false, port = 0, originOverride, allowLive = false, configOverrides = {}, mailTransport, telegramFetch, postgresUrl } = {}) {
   if (postgresUrl && !['127.0.0.1','localhost','[::1]'].includes(new URL(postgresUrl).hostname)) {
     throw new Error('Use um PostgreSQL local descartável para os testes.');
   }
@@ -79,7 +80,7 @@ export async function fixture({ browser = false, port = 0, originOverride, allow
     remote.calls.push({ hostname, route, key, method, body, idempotency: options.headers['Idempotency-Key'],
       userAgent: options.headers['User-Agent'], query: searchParams });
     if (key === wrongKey || remote.failing) return output({ message: 'Invalid API key' }, 401);
-    if (![firstKey,secondKey,liveKey,otherKey,otherLiveKey].includes(key)) return output({ message: 'Invalid API key' }, 401);
+    if (![firstKey,secondKey,liveKey,secondLiveKey,otherKey,otherLiveKey].includes(key)) return output({ message: 'Invalid API key' }, 401);
     const merchant = [otherKey,otherLiveKey].includes(key) ? otherAccount : account;
     const belongs = order => (order?.fixtureAccount ?? (order ? account : null)) === merchant;
     if (route === '/orders' && method === 'GET' && searchParams.has('code') && remote.orderLookup) return remote.orderLookup(searchParams);
@@ -97,6 +98,7 @@ export async function fixture({ browser = false, port = 0, originOverride, allow
         id: 'ch_Direct' + sequence, amount, status, paid_amount: status === 'paid' ? amount : 0,
         payment_method: payment.payment_method, fee_amount: 99, net_amount: amount - 99, updated_at: new Date().toISOString(),
         last_transaction: { id: 'tran_Direct' + sequence, status: declined ? 'not_authorized' : manual ? 'authorized_pending_capture' : pending ? 'pending' : 'captured',
+          installments: card.installments,
           card: { brand: 'Visa', number: '4000100511112003', cvv: '789' },
           ...(declined ? { acquirer_return_code: '0051', acquirer_message: 'Recusa do fixture local' } : {}) }
       }] };
@@ -176,7 +178,7 @@ export async function fixture({ browser = false, port = 0, originOverride, allow
     ADMIN_PASSWORD: password, SESSION_SECRET: 'sessao_local_de_teste_exclusivamente_013',
     ENCRYPTION_KEY: Buffer.alloc(32, 17).toString('base64'), WEBHOOK_SECRET: hookSecret, APP_ORIGIN: originOverride ?? origin, ALLOW_LIVE_PAYMENTS: String(allowLive), PAGARME_DEBIT_APPROVAL_TEST: 'sandbox-approved-reference', ...configOverrides
   });
-  const createFixtureApp = () => createApp({ db, config, pagarme, viaFetch, mailTransport,
+  const createFixtureApp = () => createApp({ db, config, pagarme, viaFetch, mailTransport, telegramFetch,
     stoneFetch: async () => remote.diagnostic3dsHttp ? Response.json({}, { status: remote.diagnostic3dsHttp }) : Response.json({ tds_token: 'fixture-3ds-token' }) });
   let app = createFixtureApp();
   const restart = () => { app = createFixtureApp(); };

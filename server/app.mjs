@@ -1,3 +1,4 @@
+import { makeTelegram } from './telegram.mjs';
 import { diagnoseDebit } from './debit-diagnostics.mjs';
 import { addMerchant, defaultMerchant, merchantId, merchantRow, merchantWebhookSecret } from './merchants.mjs';
 import { makeNotifications, notificationFilter, reportFilter, sendWorkbook } from './notifications.mjs';
@@ -47,11 +48,11 @@ const csvCell = value => {
   return '"' + safe.replaceAll('"', '""') + '"';
 };
 
-function adminOrder({ checkout_url, ...row }) {
+function adminOrder({ checkout_url, telegram_payment, ...row }) {
   return { ...row, has_checkout_url: Boolean(checkout_url) };
 }
 
-export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetch, stoneFetch = fetch, mailTransport, runLocalNotifications = false }) {
+export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetch, stoneFetch = fetch, mailTransport, telegramFetch, runLocalNotifications = false }) {
   const app = express();
   app.disable('x-powered-by');
   if (config.production) app.set('trust proxy', 1);
@@ -64,10 +65,13 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
   app.use(express.json({ limit: '128kb' }));
   const security = makeSecurity(db, config);
   const notifications = makeNotifications(db, config, mailTransport);
-  if (runLocalNotifications && config.notifications?.enabled && config.notifications.onCapture) {
-    const timer = setInterval(() => notifications.process().catch(() => {
-      console.error('Não foi possível processar a fila de relatórios.');
-    }), 30000);
+  const telegram = makeTelegram(db, config, telegramFetch);
+  const runReports = config.notifications?.enabled && config.notifications.onCapture;
+  if (runLocalNotifications && (runReports || config.telegram?.enabled)) {
+    const timer = setInterval(() => {
+      if (runReports) notifications.process().catch(() => console.error('Falha ao processar a fila de relatórios.'));
+      if (config.telegram?.enabled) telegram.process().catch(() => console.error('Falha ao processar a fila Telegram.'));
+    }, 30000);
     timer.unref();
   }
   function scopedPayments(merchant) {
@@ -167,7 +171,11 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
     if (!secret || !equalSecret(req.get('Authorization') ?? '', 'Bearer ' + secret)) {
       throw new HttpError(404, 'Rota inexistente.');
     }
-    res.json(await notifications.process());
+    if (!config.telegram?.enabled) return res.json(await notifications.process());
+    const [reports, monitor] = await Promise.allSettled([notifications.process(), telegram.process()]);
+    if (monitor.status === 'rejected') console.error('Falha ao processar a fila Telegram.');
+    if (reports.status === 'rejected') throw reports.reason;
+    res.json({ ...reports.value, telegram: monitor.status === 'fulfilled' ? monitor.value : { error: 'queue_processing_failed' } });
   });
 
   app.post('/api/admin/login', security.origin, security.limit('login-ip', 8, 900), security.limit('login-total', 80, 900, true), security.login);
@@ -198,6 +206,24 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
     }
     res.locals.payments = scopedPayments(merchant);
     next();
+  });
+
+  app.get('/api/admin/telegram', async (_req, res) => {
+    res.json(await telegram.overview(res.locals.merchant.id));
+  });
+  app.put('/api/admin/telegram/configuration', security.limit('telegram-config', 10, 60, true), async (req, res) => {
+    res.json(await telegram.configure(req.body));
+  });
+  app.put('/api/admin/telegram/activation', security.limit('telegram-config', 10, 60, true), async (req, res) => {
+    const input = parse(z.object({ enabled: z.boolean() }).strict(), req.body, 'Informe a configuração de ativação.');
+    res.json(await telegram.toggle(input.enabled));
+  });
+  app.put('/api/admin/telegram/authorization', security.limit('telegram-consent', 20, 60), async (req, res) => {
+    res.json(await telegram.authorize(res.locals.merchant.id, req.body));
+  });
+  app.post('/api/admin/telegram/:action', security.limit('telegram-test', 6, 60, true), async (req, res) => {
+    const action = parse(z.enum(['connection','test-message']), req.params.action, 'Ação inválida.');
+    res.json(await telegram.test(action === 'test-message'));
   });
 
   app.get('/api/admin/notifications', async (req, res) => {

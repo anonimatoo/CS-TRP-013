@@ -5,6 +5,7 @@ import { Login } from './pages/Login';
 import { Gateway } from './pages/Gateway';
 import { Dashboard } from './pages/Dashboard';
 import { Settings } from './pages/Settings';
+import { TelegramMonitor } from './pages/TelegramMonitor';
 import { Notifications } from './pages/Notifications';
 import { Field } from './components/UI';
 import { Transactions } from './pages/Transactions';
@@ -13,7 +14,7 @@ import { ApiError, adminSessionExpired, api, explain, merchantPath, storefrontMe
 
 const tabs = [
   { key: 'gateway', label: 'Gateway' }, { key: 'dashboard', label: 'Dashboard' },
-  { key: 'settings', label: 'Configuração comercial' }, { key: 'transactions', label: 'Transações' }, { key: 'notifications', label: 'Relatórios e Notificações' }
+  { key: 'settings', label: 'Configuração comercial' }, { key: 'transactions', label: 'Transações' }, { key: 'notifications', label: 'Relatórios e Notificações' }, { key: 'telegram', label: 'Telegram Monitor' }
 ] as const;
 
 export default function App() {
@@ -148,6 +149,7 @@ export default function App() {
               void loadMerchantProduct(merchant.id).then(setMerchantProduct).catch(() => {});
             }} />}
             {tab === 'transactions' && <Transactions key={merchant.id + env} merchant={merchant.id} csrf={csrf} env={env} readOnly={merchant.quarantined} />}
+            {tab === 'telegram' && !merchant.quarantined && <TelegramMonitor key={merchant.id} merchant={merchant} csrf={csrf} />}
             {tab === 'notifications' && <Notifications key={merchant.id} merchant={merchant} csrf={csrf} />}
             </>}
             {logoutError && <p className="notice error" role="alert">{logoutError}</p>}
