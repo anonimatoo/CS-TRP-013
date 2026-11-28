@@ -1,3 +1,5 @@
+import pgDriver from 'pg';
+import { createDatabase } from '../server/db.mjs';
 import { PGlite } from '@electric-sql/pglite';
 import express from 'express';
 import { once } from 'node:events';
@@ -14,15 +16,22 @@ export const secondKey = 'sk_test_local_013_credencial_b';
 export const liveKey = 'sk_local_013_producao_a';
 export const wrongKey = 'sk_test_recusada_credencial_x';
 export const account = 'acc_TestMerchant013';
+export const otherKey = 'sk_test_local_013_outro_lojista';
+export const otherLiveKey = 'sk_local_013_outro_lojista';
+export const otherAccount = 'acc_OtherMerchant013';
 
-export async function fixture({ browser = false, port = 0, originOverride, allowLive = false } = {}) {
-  const pg = new PGlite();
+export async function fixture({ browser = false, port = 0, originOverride, allowLive = false, configOverrides = {}, mailTransport, postgresUrl } = {}) {
+  if (postgresUrl && !['127.0.0.1','localhost','[::1]'].includes(new URL(postgresUrl).hostname)) {
+    throw new Error('Use um PostgreSQL local descartável para os testes.');
+  }
+  const postgres = postgresUrl ? new pgDriver.Pool({ connectionString: postgresUrl, max: 8 }) : null;
+  const pg = postgres ? null : new PGlite();
   const adapter = client => ({
-    query: (sql, args) => !args && /^(CREATE SCHEMA|ALTER TABLE)/.test(sql) && sql.includes(';')
+    query: (sql, args) => !args && /^(CREATE SCHEMA|CREATE TABLE|ALTER TABLE)/.test(sql) && sql.includes(';')
       ? client.exec(sql) : client.query(sql, args)
   });
-  const db = { ...adapter(pg), tx: fn => pg.transaction(tx => fn(adapter(tx))) };
-  await pg.exec(`CREATE TABLE public.anterior(id integer);
+  const db = postgres ? createDatabase(postgres) : { ...adapter(pg), tx: fn => pg.transaction(tx => fn(adapter(tx))) };
+  await db.query(`CREATE TABLE public.anterior(id integer);
     INSERT INTO public.anterior VALUES(7);
     CREATE SCHEMA cs_trp_013;
     CREATE TABLE cs_trp_013.orders(id integer);
@@ -70,9 +79,11 @@ export async function fixture({ browser = false, port = 0, originOverride, allow
     remote.calls.push({ hostname, route, key, method, body, idempotency: options.headers['Idempotency-Key'],
       userAgent: options.headers['User-Agent'], query: searchParams });
     if (key === wrongKey || remote.failing) return output({ message: 'Invalid API key' }, 401);
-    if (![firstKey,secondKey,liveKey].includes(key)) return output({ message: 'Invalid API key' }, 401);
+    if (![firstKey,secondKey,liveKey,otherKey,otherLiveKey].includes(key)) return output({ message: 'Invalid API key' }, 401);
+    const merchant = [otherKey,otherLiveKey].includes(key) ? otherAccount : account;
+    const belongs = order => (order?.fixtureAccount ?? (order ? account : null)) === merchant;
     if (route === '/orders' && method === 'GET' && searchParams.has('code') && remote.orderLookup) return remote.orderLookup(searchParams);
-    if (route === '/orders' && method === 'GET') return output({ data: [...remote.orders.values()].filter(order => !searchParams.has('code') || order.code === searchParams.get('code')) });
+    if (route === '/orders' && method === 'GET') return output({ data: [...remote.orders.values()].filter(order => belongs(order) && (!searchParams.has('code') || order.code === searchParams.get('code'))) });
     if (route === '/orders' && method === 'POST') {
       const sequence = ++remote.sequence;
       const payment = body.payments[0];
@@ -80,11 +91,13 @@ export async function fixture({ browser = false, port = 0, originOverride, allow
       const amount = body.items[0].amount;
       const declined = card.card_token === 'token_declined';
       const manual = card.operation_type === 'auth_only';
-      const status = declined ? 'failed' : manual ? 'pending' : 'paid';
-      const order = { id: 'or_Direct' + sequence, code: body.code, amount, status, charges: [{
+      const pending = card.card_token === 'token_pending';
+      const status = declined ? 'failed' : manual || pending ? 'pending' : 'paid';
+      const order = { id: 'or_Direct' + sequence, code: body.code, amount, status, fixtureAccount: merchant, charges: [{
         id: 'ch_Direct' + sequence, amount, status, paid_amount: status === 'paid' ? amount : 0,
-        payment_method: payment.payment_method, updated_at: new Date().toISOString(),
-        last_transaction: { id: 'tran_Direct' + sequence, status: declined ? 'not_authorized' : manual ? 'authorized_pending_capture' : 'captured',
+        payment_method: payment.payment_method, fee_amount: 99, net_amount: amount - 99, updated_at: new Date().toISOString(),
+        last_transaction: { id: 'tran_Direct' + sequence, status: declined ? 'not_authorized' : manual ? 'authorized_pending_capture' : pending ? 'pending' : 'captured',
+          card: { brand: 'Visa', number: '4000100511112003', cvv: '789' },
           ...(declined ? { acquirer_return_code: '0051', acquirer_message: 'Recusa do fixture local' } : {}) }
       }] };
       remote.orders.set(order.id, order);
@@ -134,12 +147,14 @@ export async function fixture({ browser = false, port = 0, originOverride, allow
       const link = remote.links.get(id);
       return link ? output(link) : output({},404);
     }
-    if (route.startsWith('/orders/')) return remote.orders.has(route.slice(8)) ? output(remote.orders.get(route.slice(8))) : output({},404);
-    if (route === '/hooks') return output({ data: [...remote.hooks.values()] });
-    if (route.startsWith('/hooks/')) return remote.hooks.has(route.slice(7)) ? output(remote.hooks.get(route.slice(7))) : output({},404);
+    if (route.startsWith('/orders/')) return belongs(remote.orders.get(route.slice(8))) ? output(remote.orders.get(route.slice(8))) : output({},404);
+    if (route === '/hooks' && remote.diagnosticHooks && searchParams.get('size') === '10') return remote.diagnosticHooks(merchant);
+    if (route === '/charges' && remote.diagnosticCharges && searchParams.has('page')) return remote.diagnosticCharges(merchant);
+    if (route === '/hooks') return output({ data: [{ account: { id: merchant } }] });
+    if (route.startsWith('/hooks/')) return remote.hooks.get(route.slice(7))?.account?.id === merchant ? output(remote.hooks.get(route.slice(7))) : output({},404);
     if (route.startsWith('/charges/')) {
       const [id, action] = route.slice(9).split('/');
-      const charge = [...remote.orders.values()].map(order => order.charges[0]).find(value => value.id === id);
+      const charge = [...remote.orders.values()].filter(belongs).map(order => order.charges[0]).find(value => value.id === id);
       if (!charge) return output({},404);
       if (method === 'GET') return output(charge);
       if (action === 'capture') Object.assign(charge, { status: 'paid', paid_amount: charge.amount, updated_at: new Date().toISOString(), last_transaction: { id: 'tran_ManualCapture', status: 'captured' } });
@@ -159,10 +174,13 @@ export async function fixture({ browser = false, port = 0, originOverride, allow
   const origin = 'http://127.0.0.1:' + server.address().port;
   const config = configFromEnv({
     ADMIN_PASSWORD: password, SESSION_SECRET: 'sessao_local_de_teste_exclusivamente_013',
-    ENCRYPTION_KEY: Buffer.alloc(32, 17).toString('base64'), WEBHOOK_SECRET: hookSecret, APP_ORIGIN: originOverride ?? origin, ALLOW_LIVE_PAYMENTS: String(allowLive), PAGARME_DEBIT_APPROVAL_TEST: 'sandbox-approved-reference'
+    ENCRYPTION_KEY: Buffer.alloc(32, 17).toString('base64'), WEBHOOK_SECRET: hookSecret, APP_ORIGIN: originOverride ?? origin, ALLOW_LIVE_PAYMENTS: String(allowLive), PAGARME_DEBIT_APPROVAL_TEST: 'sandbox-approved-reference', ...configOverrides
   });
-  const app = createApp({ db, config, pagarme, viaFetch,
-    stoneFetch: async () => Response.json({ tds_token: 'fixture-3ds-token' }) });
+  const createFixtureApp = () => createApp({ db, config, pagarme, viaFetch, mailTransport,
+    stoneFetch: async () => remote.diagnostic3dsHttp ? Response.json({}, { status: remote.diagnostic3dsHttp }) : Response.json({ tds_token: 'fixture-3ds-token' }) });
+  let app = createFixtureApp();
+  const restart = () => { app = createFixtureApp(); };
+  const serve = (req, res, next) => app(req, res, next);
   if (browser) {
     host.use((req, res, next) => {
       if (req.path.startsWith('/api/')) return app(req,res,next);
@@ -171,10 +189,11 @@ export async function fixture({ browser = false, port = 0, originOverride, allow
       next();
     });
     host.use(express.static(resolve('dist')));
-  } else host.use(app);
+  } else host.use(serve);
 
-  return { remote, origin, db, close: async () => {
+  return { remote, origin, db, restart, config, close: async () => {
     await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-    await pg.close();
+    if (postgres) await postgres.end();
+    else await pg.close();
   } };
 }

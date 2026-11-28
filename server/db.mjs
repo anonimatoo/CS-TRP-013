@@ -45,6 +45,6 @@ export async function one(db, sql, args) {
   return (await db.query(sql, args)).rows[0];
 }
 
-export async function audit(db, action, details = {}) {
-  await db.query('INSERT INTO cs_trp_013_v2.audit (action,details) VALUES ($1,$2)', [action, JSON.stringify(details)]);
+export async function audit(db, action, details = {}, merchantId = null) {
+  await db.query('INSERT INTO cs_trp_013_v2.audit (action,details,merchant_id) VALUES ($1,$2,$3)', [action, JSON.stringify(details), merchantId]);
 }

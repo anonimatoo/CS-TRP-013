@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, brl, dateTime, explain, providerErrorLabel, reconciliations, statusLabel, type Environment, type CardMethod } from '../services/api';
+import { api, merchantPath, brl, dateTime, explain, providerErrorLabel, reconciliations, statusLabel, type Environment, type CardMethod } from '../services/api';
 import { Loader } from '../components/UI';
 
 interface Diagnostic {
@@ -46,7 +46,7 @@ function diagnosticShape(value: Diagnostic['body']) {
     value.fieldCount == null ? null : value.fieldCount + ' campos', ...fields].filter(Boolean).join(' · ');
 }
 
-export function Transactions({ env, csrf }: { env: Environment; csrf: string }) {
+export function Transactions({ env, csrf, merchant, readOnly }: { env: Environment; csrf: string; merchant: string; readOnly: boolean }) {
   const [result, setResult] = useState<{ rows: Row[]; hasNext: boolean }>();
   const [details, setDetails] = useState<{ row: Row; events: Event[] }>();
   const [page, setPage] = useState(1);
@@ -55,7 +55,7 @@ export function Transactions({ env, csrf }: { env: Environment; csrf: string }) 
   const [confirm, setConfirm] = useState<Action>();
 
   async function load() {
-    try { setResult(await api('/admin/transactions/' + env + '?page=' + page)); }
+    try { setResult(await api(merchantPath('/admin/transactions/' + env + '?page=' + page, merchant))); }
     catch (failure) { setError(explain(failure)); }
   }
   useEffect(() => { void load(); }, [page]);
@@ -63,7 +63,7 @@ export function Transactions({ env, csrf }: { env: Environment; csrf: string }) 
   async function open(id: string) {
     setError('');
     setConfirm(undefined);
-    try { setDetails(await api('/admin/orders/' + id)); }
+    try { setDetails(await api(merchantPath('/admin/orders/' + id, merchant))); }
     catch (failure) { setError(explain(failure)); }
   }
   async function run(action: Action) {
@@ -71,7 +71,7 @@ export function Transactions({ env, csrf }: { env: Environment; csrf: string }) 
     setBusy(true);
     setError('');
     try {
-      await api('/admin/orders/' + details.row.id + '/' + action, { method: 'POST', csrf, body: { confirmed: true } });
+      await api(merchantPath('/admin/orders/' + details.row.id + '/' + action, merchant), { method: 'POST', csrf, body: { confirmed: true } });
       await open(details.row.id);
       await load();
     } catch (failure) {
@@ -82,7 +82,7 @@ export function Transactions({ env, csrf }: { env: Environment; csrf: string }) 
   }
 
   return <>
-    <div className="transaction-header"><h3>Histórico de transações</h3><a className="button secondary" href={'/api/admin/report/' + env}>Exportar CSV</a></div>
+    <div className="transaction-header"><h3>Histórico de transações</h3><a className="button secondary" href={merchantPath('/api/admin/report/' + env, merchant)}>Exportar CSV</a></div>
     {error && <p className="notice error" role="alert">{error}</p>}
     {!result && !error && <p><Loader /> Carregando histórico</p>}
     {result?.rows.length === 0 && <p className="notice">Nenhum pedido neste ambiente.</p>}
@@ -136,11 +136,11 @@ export function Transactions({ env, csrf }: { env: Environment; csrf: string }) 
         </ul>
       </details>}
       <ul className="events">{details.events.map(event => <li key={event.id}>{dateTime(event.created_at)} · {statusLabel(event.status)} {event.provider_id ?? ''}</li>)}</ul>
-      <div className="gateway-actions">
+      {!readOnly && <div className="gateway-actions">
         <button className="button secondary" disabled={busy} onClick={() => void run('refresh')}>{busy && <Loader />} Consultar provedor</button>
         {details.row.status === 'authorized' && details.row.payment_method !== 'debit_card' && <button className="button primary" disabled={busy} onClick={() => setConfirm('capture')}>Capturar</button>}
         {['authorized','paid','captured'].includes(details.row.status) && <button className="button danger" disabled={busy} onClick={() => setConfirm('cancel')}>{details.row.status === 'authorized' ? 'Cancelar autorização' : 'Estornar'}</button>}
-      </div>
+      </div>}
       {confirm && <div className="confirmation"><p>Confirma {confirm === 'capture' ? 'a captura' : 'o cancelamento ou estorno'} de {brl(details.row.amount)}?</p>
         <div><button className="button secondary" onClick={() => setConfirm(undefined)}>Voltar</button><button className="button primary" disabled={busy} onClick={() => void run(confirm)}>Confirmar</button></div>
       </div>}

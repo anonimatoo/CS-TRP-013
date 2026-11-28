@@ -1,19 +1,19 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Field, Loader } from '../components/UI';
-import { api, brl, explain, type Environment, type Product } from '../services/api';
+import { api, merchantPath, brl, explain, type Environment, type Product } from '../services/api';
 
-export function Settings({ csrf, onChange }: { csrf: string; onChange: () => void }) {
+export function Settings({ csrf, onChange, merchant }: { merchant: string; csrf: string; onChange: () => void }) {
   const [product, setProduct] = useState<Product>();
   const [price, setPrice] = useState('');
   const [busy, setBusy] = useState(true);
   const [message, setMessage] = useState({ text: '', error: false });
 
   useEffect(() => {
-    api<Product>('/admin/product').then(result => {
+    api<Product>(merchantPath('/admin/product', merchant)).then(result => {
       setProduct(result);
       setPrice(result.amount === null ? '' : brl(result.amount));
     }).catch(error => setMessage({ text: explain(error), error: true })).finally(() => setBusy(false));
-  }, []);
+  }, [merchant]);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -22,7 +22,7 @@ export function Settings({ csrf, onChange }: { csrf: string; onChange: () => voi
     setMessage({ text: '', error: false });
     try {
       const { name, description, image, maxInstallments, enabled, environment, operation } = product;
-      const updated = await api<Product>('/admin/product', { method: 'PUT', csrf, body: { name, description, image, maxInstallments, enabled, environment, operation, price } });
+      const updated = await api<Product>(merchantPath('/admin/product', merchant), { method: 'PUT', csrf, body: { name, description, image, maxInstallments, enabled, environment, operation, price } });
       setProduct({ ...updated, min: product.min, max: product.max });
       setPrice(brl(updated.amount!));
       setMessage({ text: 'Configuração comercial salva.', error: false });

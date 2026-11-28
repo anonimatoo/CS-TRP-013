@@ -30,9 +30,18 @@ export function configFromEnv(env = process.env) {
   if (!Number.isInteger(min) || !Number.isInteger(max) || min < 1 || min > max || max > 2147483647) {
     throw new Error('Limites de valor inválidos.');
   }
+  const smtpPort = Number(env.SMTP_PORT || 587);
+  if (!Number.isInteger(smtpPort) || smtpPort < 1 || smtpPort > 65535) throw new Error('SMTP_PORT inválida.');
+  if (env.CRON_SECRET && env.CRON_SECRET.length < 32) throw new Error('CRON_SECRET precisa ter pelo menos 32 caracteres.');
+  const merchantDebitApprovals = JSON.parse(env.PAGARME_MERCHANT_DEBIT_APPROVALS || '{}');
   return { password, sessionSecret, encryptionKey, webhookSecret, origin: origin.origin, production, min, max,
     allowLive: env.ALLOW_LIVE_PAYMENTS === 'true',
-    debitApproval: { test: env.PAGARME_DEBIT_APPROVAL_TEST, live: env.PAGARME_DEBIT_APPROVAL_LIVE } };
+    debitApproval: { test: env.PAGARME_DEBIT_APPROVAL_TEST, live: env.PAGARME_DEBIT_APPROVAL_LIVE },
+    merchantDebitApprovals,
+    notifications: { enabled: env.EMAIL_REPORT_ENABLED === 'true', onCapture: env.EMAIL_REPORT_ON_CAPTURE === 'true',
+      suggestedRecipient: env.EMAIL_REPORT_RECIPIENT || '', cronSecret: env.CRON_SECRET || '',
+      smtp: { host: env.SMTP_HOST || '', port: smtpPort, secure: env.SMTP_SECURE === 'true',
+        user: env.SMTP_USER || '', password: env.SMTP_PASSWORD || '', sender: env.EMAIL_FROM || '' } } };
 }
 
 export function encrypt(key, data, context) {
