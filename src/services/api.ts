@@ -88,6 +88,7 @@ export const reconciliations: Record<string, string> = {
   closed_without_order: 'Link encerrado sem pedido', rejected: 'Criação rejeitada pelo provedor'
 };
 const providerErrors: Record<string, string> = {
+  provider_ip_allowlist: 'Bloqueio de IP informado pela Pagar.me',
   provider_authentication: 'Falha de autenticação', provider_permission: 'Permissão insuficiente',
   provider_validation: 'Solicitação rejeitada pela Pagar.me', gateway_configuration: 'Erro de configuração do gateway',
   provider_rate_limit: 'Limite de requisições do provedor',

@@ -1,3 +1,4 @@
+import { Connectivity } from '../components/Connectivity';
 import { useEffect, useState } from 'react';
 import { Activity, CircleDot, KeyRound, Power, RefreshCw, Unlink } from 'lucide-react';
 import { pagarmeKeyEnvironment } from '../../shared/validation.mjs';
@@ -155,7 +156,7 @@ export function Gateway({ csrf, merchant, env, product, onCommercialSettings, on
         <button className="button primary" type={gateway.hasKey ? 'button' : 'submit'} disabled={!!busy || gateway.hasKey}><KeyRound size={17} /> ADICIONAR CHAVE</button>
         <button className="button dark" type="button" disabled={!!busy || !gateway.hasKey} onClick={() => void act('test')}><Activity size={17} /> TESTAR CONEXÃO</button>
         <button className="button secondary" type={gateway.hasKey ? 'submit' : 'button'} disabled={!!busy || !gateway.hasKey}><RefreshCw size={17} /> SUBSTITUIR CHAVE SK</button>
-        <button className="button secondary" type="button" disabled={!!busy || !gateway.connected || !gateway.publicKey || gateway.enabled || Boolean(gateway.activationBlock)} onClick={() => { setPending('activate'); setConfirmed(false); }}><Power size={17} /> ATIVAR GATEWAY</button>
+        <button className="button secondary" type="button" disabled={!!busy || !gateway.connected || (!gateway.publicKey && !gateway.account) || gateway.enabled || Boolean(gateway.activationBlock)} onClick={() => { setPending('activate'); setConfirmed(false); }}><Power size={17} /> ATIVAR GATEWAY</button>
         <button className="button secondary" type="button" disabled={!!busy || !gateway.enabled} onClick={() => void act('disable')}><Power size={17} /> DESATIVAR GATEWAY</button>
         <button className="button danger" type="button" disabled={!!busy || !gateway.hasKey} onClick={() => { setPending('disconnect'); setConfirmed(false); }}><Unlink size={17} /> DESCONECTAR CHAVE</button>
       </div>}
@@ -184,6 +185,9 @@ export function Gateway({ csrf, merchant, env, product, onCommercialSettings, on
       </dl>
       <button className="button secondary" disabled={!!busy || !gateway.connected}>Salvar modalidades</button>
     </form>}
+    {gateway && <Connectivity key={env + ':' + gateway.updatedAt + ':' + gateway.account}
+      merchant={merchant} env={env} csrf={csrf} needsAccount={gateway.hasKey && !gateway.account}
+      onVerified={() => setRetry(value => value + 1)} />}
     {gateway && <DebitDiagnostics key={env + ':' + gateway.updatedAt + ':' + gateway.testedAt}
       csrf={csrf} merchant={merchant} env={env} disabled={!!busy} />}
     {gateway && pending && <div className="confirmation">

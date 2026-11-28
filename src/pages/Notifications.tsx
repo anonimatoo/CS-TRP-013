@@ -24,7 +24,7 @@ const errorLabels: Record<string, string> = {
 const orderStatuses = ['paid','captured','pending','declined','authorized','canceled','refunded','processing','review',
   'communication_error','request_failed','authentication_incomplete','expired','chargedback'];
 
-export function Notifications({ merchant, csrf }: { merchant: Merchant; csrf: string }) {
+export function Notifications({ merchant, csrf, platform }: { merchant: Merchant; csrf: string; platform: boolean }) {
   const [sharing, setSharing] = useState<Sharing>();
   const [enabled, setEnabled] = useState(false);
   const [authorized, setAuthorized] = useState(false);
@@ -70,9 +70,9 @@ export function Notifications({ merchant, csrf }: { merchant: Merchant; csrf: st
     let current = true;
     Promise.all([
       api<Sharing>(scoped('/admin/notifications/settings')),
-      api<SmtpInfo>('/admin/notifications/smtp')
+      platform ? api<SmtpInfo>('/admin/notifications/smtp') : Promise.resolve(undefined)
     ]).then(([sharing, smtp]) => {
-      if (current) { showSharing(sharing); showSmtp(smtp); }
+      if (current) { showSharing(sharing); if (smtp) showSmtp(smtp); }
     }).catch(error => { if (current) setFeedback({ error: true, text: explain(error) }); });
     return () => { current = false; };
   }, [merchant.id]);
@@ -129,7 +129,7 @@ export function Notifications({ merchant, csrf }: { merchant: Merchant; csrf: st
           <option value="">Todos</option>{orderStatuses.map(status => <option key={status} value={status}>{statusLabel(status)}</option>)}
         </select></label>
       </div>
-      {!merchant.quarantined && <label><input type="checkbox" checked={filter.consolidated === 'true'}
+      {platform && !merchant.quarantined && <label><input type="checkbox" checked={filter.consolidated === 'true'}
         onChange={e => setFilter({ ...filter, consolidated: e.target.checked ? 'true' : '' })} /> Consolidar lojistas com compartilhamento autorizado</label>}
       {totals && <div className="dashboard">
         {[['Pedidos', totals.orders], ['Capturas confirmadas', totals.captured], ['Valor bruto capturado', brl(totals.gross)],

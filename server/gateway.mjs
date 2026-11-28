@@ -126,6 +126,7 @@ export function makeGateway(db, config, pagarme, stoneFetch, merchant) {
     } catch (error) {
       if (!(error instanceof ProviderError)) throw error;
       const messages = {
+        provider_ip_allowlist: 'A Pagar.me informou bloqueio do IP de saída da aplicação.',
         provider_authentication: 'A Pagar.me recusou a autenticação da Secret Key.',
         provider_permission: 'A Secret Key não tem permissão para uma das consultas da Pagar.me.',
         gateway_account_mismatch: 'A conta ou a referência consultada diverge do histórico local.',
@@ -240,8 +241,8 @@ export function makeGateway(db, config, pagarme, stoneFetch, merchant) {
       if (block) throw new HttpError(409, block);
       if (form?.confirmed !== true) throw new HttpError(422, 'Confirme a ativação das cobranças na Pagar.me.');
       if (!before.last_ok) throw new HttpError(409, 'Execute um teste de conexão bem-sucedido.');
-      if (!before.public_key) throw new HttpError(409, 'Cadastre a chave pública para tokenizar cartões.');
-      await pagarme(gatewaySecret(config, before), '/orders?size=1');
+      if (!before.public_key && !before.account) throw new HttpError(409, 'Vincule a conta Pagar.me ou cadastre a chave pública para o checkout direto.');
+      await pagarme(gatewaySecret(config, before), before.public_key ? '/orders?size=1' : '/paymentlinks?per_page=1');
     }
     if (action === 'disconnect' && form?.confirmed !== true) throw new HttpError(422, 'Confirme a desconexão da chave.');
     return db.tx(async client => {

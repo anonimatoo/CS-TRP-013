@@ -19,14 +19,16 @@ export async function merchantRow(db, input, { allowQuarantine = false } = {}) {
 export async function addMerchant(db, input) {
   const parsed = z.object({ name: z.string().trim().min(1).max(100) }).strict().safeParse(input);
   if (!parsed.success) throw new HttpError(422, 'Informe o nome comercial do lojista.');
+  return db.tx(client => insertMerchant(client, parsed.data.name));
+}
+
+export async function insertMerchant(client, name) {
   const id = randomUUID();
-  return db.tx(async client => {
-    const row = await one(client, `INSERT INTO cs_trp_013_v2.merchants(id,name) VALUES ($1,$2)
-      RETURNING id,name,quarantined`, [id, parsed.data.name]);
-    await client.query(`INSERT INTO cs_trp_013_v2.gateway(merchant_id,environment) VALUES ($1,'test'),($1,'live')`, [id]);
-    await client.query(`INSERT INTO cs_trp_013_v2.product(merchant_id,id,name,description,image)
-      VALUES ($1,1,'PC Gamer','Computador gamer personalizado','/images/pc-gamer.webp')`, [id]);
-    await audit(client, 'merchant.add', {}, id);
-    return row;
-  });
+  const row = await one(client, `INSERT INTO cs_trp_013_v2.merchants(id,name) VALUES ($1,$2)
+    RETURNING id,name,quarantined`, [id, name]);
+  await client.query(`INSERT INTO cs_trp_013_v2.gateway(merchant_id,environment) VALUES ($1,'test'),($1,'live')`, [id]);
+  await client.query(`INSERT INTO cs_trp_013_v2.product(merchant_id,id,name,description,image)
+    VALUES ($1,1,'PC Gamer','Computador gamer personalizado','/images/pc-gamer.webp')`, [id]);
+  await audit(client, 'merchant.add', {}, id);
+  return row;
 }

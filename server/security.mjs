@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { one } from './db.mjs';
 
@@ -38,6 +39,7 @@ export function configFromEnv(env = process.env) {
     allowLive: env.ALLOW_LIVE_PAYMENTS === 'true',
     debitApproval: { test: env.PAGARME_DEBIT_APPROVAL_TEST, live: env.PAGARME_DEBIT_APPROVAL_LIVE },
     merchantDebitApprovals,
+    staticEgressIPs: (env.PAGARME_STATIC_EGRESS_IPS ?? '').split(',').map(ip => ip.trim()).filter(ip => isIP(ip)),
     telegram: { enabled: env.TELEGRAM_NOTIFICATIONS_ENABLED === 'true',
       token: env.TELEGRAM_BOT_TOKEN || '', chatId: env.TELEGRAM_CHAT_ID || '' },
     notifications: { enabled: env.EMAIL_REPORT_ENABLED === 'true', onCapture: env.EMAIL_REPORT_ON_CAPTURE === 'true',
@@ -91,7 +93,7 @@ export function makeSecurity(db, config) {
     const token = req.headers.cookie?.split(';').map(value => value.trim()).find(value => value.startsWith(cookie + '='))?.slice(cookie.length + 1);
     if (!token || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw new HttpError(401, 'Entre com a senha administrativa.');
     const id = identify(token);
-    const current = await one(db, 'SELECT id,csrf FROM cs_trp_013_v2.sessions WHERE id=$1 AND expires_at>now()', [id]);
+    const current = await one(db, 'SELECT id,csrf,merchant_id FROM cs_trp_013_v2.sessions WHERE id=$1 AND expires_at>now()', [id]);
     if (!current) throw new HttpError(401, 'Sessão encerrada. Entre novamente.');
     req.admin = current;
     next();
@@ -102,14 +104,18 @@ export function makeSecurity(db, config) {
     next();
   }
 
+  async function startSession(res, merchant = null) {
+    const token = secretToken();
+    const csrfToken = secretToken();
+    await db.query("INSERT INTO cs_trp_013_v2.sessions(id,csrf,expires_at,merchant_id) VALUES ($1,$2,now()+interval '4 hours',$3)", [identify(token), csrfToken, merchant]);
+    res.cookie(cookie, token, { ...cookieOptions, maxAge: 14400000 }).json({ csrf: csrfToken });
+  }
+
   async function login(req, res) {
     if (typeof req.body?.password !== 'string' || !equalSecret(req.body.password, config.password)) {
       throw new HttpError(401, 'Senha administrativa incorreta.');
     }
-    const token = secretToken();
-    const csrfToken = secretToken();
-    await db.query("INSERT INTO cs_trp_013_v2.sessions VALUES ($1,$2,now()+interval '4 hours')", [identify(token), csrfToken]);
-    res.cookie(cookie, token, { ...cookieOptions, maxAge: 14400000 }).json({ csrf: csrfToken });
+    return startSession(res);
   }
 
   async function logout(req, res) {
@@ -117,5 +123,5 @@ export function makeSecurity(db, config) {
     res.clearCookie(cookie, cookieOptions).json({ ok: true });
   }
 
-  return { origin, limit, active, csrf, login, logout };
+  return { origin, limit, active, csrf, login, logout, startSession };
 }

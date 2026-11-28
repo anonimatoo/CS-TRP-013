@@ -149,6 +149,8 @@ function validateCheckout(row, result, operation) {
   }
   require(data.status != null && data.total_sessions != null, 'checkout_session_state', 'checkout_incomplete');
   require(['active', 'building', ...closedLinkStatuses].includes(data.status), 'checkout_status');
+  if (row.price_version === null) require(data.max_sessions === 1 && data.max_paid_sessions === 1,
+    'checkout_single_payment', 'checkout_incomplete');
   const paidSessions = data.total_paid_sessions ?? 0;
   require(Number.isSafeInteger(data.total_sessions) && data.total_sessions >= 0 &&
     Number.isSafeInteger(paidSessions) && paidSessions >= 0 && paidSessions <= data.total_sessions, 'checkout_session_counters');
@@ -335,7 +337,7 @@ export function makePayments(db, config, pagarme, merchant) {
       return await storeCheckout(linked, result, { operation, creationHttp, orderError });
     } catch (error) {
       if (!(error instanceof ProviderError) || !correlatedCheckoutId(linked, result.data) ||
-          !['checkout_incomplete', 'checkout_url_missing'].includes(error.category) || operation !== 'POST /orders') throw error;
+          !['checkout_incomplete', 'checkout_url_missing'].includes(error.category) || operation !== 'POST /paymentlinks') throw error;
       const detail = await providerRead('GET /paymentlinks/{id}', key, '/paymentlinks/' + linked.checkout_provider_id, signal);
       return storeCheckout(linked, detail, { operation: 'GET /paymentlinks/{id}', creationHttp, orderError });
     }
@@ -395,6 +397,55 @@ export function makePayments(db, config, pagarme, merchant) {
       }
       await recordCreation(gateway, row, recordedHttp, error.category);
       return saved;
+    }
+  }
+
+  async function createLink(env, { id, name, amount, installments }) {
+    const { row, gateway } = await db.tx(async client => {
+      const current = await gatewayRow(client, merchant, env, true);
+      const existing = await get(id, client);
+      if (existing) {
+        if (!existing.hosted_checkout || existing.price_version !== null || env !== existing.environment ||
+            existing.amount !== amount || existing.product_name !== name || installments !== existing.installments) {
+          throw new HttpError(409, 'Esta referência já tem outras condições de pagamento.');
+        }
+        return { row: existing };
+      }
+      if (!current.secret || !current.account || !current.enabled || !current.last_ok || (env === 'live' && !config.allowLive)) {
+        throw new HttpError(409, 'Vincule uma conta Pagar.me verificada e ative o gateway para este ambiente.');
+      }
+      const row = await one(client, `INSERT INTO cs_trp_013_v2.orders
+        (id,merchant_id,environment,account,amount,installments,product_name,status,hosted_checkout,payment_method,checkout_attempted_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,'processing',true,'credit_card',now()) ON CONFLICT DO NOTHING RETURNING *`,
+      [id, merchant, env, current.account, amount, installments, name]);
+      if (!row) throw new HttpError(409, 'Referência indisponível.');
+      return { row, gateway: current };
+    });
+    if (!gateway) return status(row);
+    let http;
+    try {
+      const key = paymentSecret(gateway);
+      const result = await pagarme(key, '/paymentlinks', { method: 'POST', idempotency: row.id, body: {
+        type: 'order', is_building: false, name: hostedCheckoutName(row.id), order_code: row.id,
+        max_sessions: 1, max_paid_sessions: 1, expires_in: checkoutMinutes,
+        cart_settings: { items: [{ name, amount, default_quantity: 1 }] },
+        payment_settings: { accepted_payment_methods: ['credit_card'], credit_card_settings: {
+          operation_type: 'auth_and_capture', installments: [{ number: installments, total: amount }]
+        } }
+      } });
+      http = result.http;
+      const saved = await storeCheckoutResponse(key, row, result, { operation: 'POST /paymentlinks', creationHttp: http });
+      await recordCreation(gateway, row, http);
+      return saved;
+    } catch (error) {
+      if (!(error instanceof ProviderError)) throw error;
+      const rejected = http == null && rejectedCreation.has(error.http);
+      const updated = await one(db, `UPDATE cs_trp_013_v2.orders SET status=$3,http_status=$4,checkout_http=$4,
+        checkout_error=$5,reconciliation_state=$6,updated_at=now()
+        WHERE id=$1 AND merchant_id=$2 AND status='processing' AND provider_order IS NULL RETURNING *`,
+      [id, merchant, rejected ? 'request_failed' : 'communication_error', http ?? error.http, error.category, rejected ? 'rejected' : 'pending']);
+      await recordCreation(gateway, row, http ?? error.http, error.category);
+      return updated ?? await get(id);
     }
   }
 
@@ -659,5 +710,5 @@ export function makePayments(db, config, pagarme, merchant) {
       ON CONFLICT DO NOTHING`, [eventId, kind, row.id, merchant, row.environment]);
   }
 
-  return { submit, get, status, refresh, operate, hook };
+  return { submit, createLink, get, status, refresh, operate, hook };
 }

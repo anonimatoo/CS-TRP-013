@@ -204,8 +204,17 @@ try {
   await passwordInput.waitFor();
   await page.keyboard.press('Escape');
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
+  await page.getByRole('button', { name: /CONECTAR CHAVE SK/ }).click();
+  await modal.getByLabel('Tipo de acesso').selectOption('register');
+  await modal.getByLabel('Nome comercial').fill('Minha Loja Browser');
+  await modal.getByLabel('E-mail', { exact: true }).fill('browser@lojistas.example');
+  await modal.getByLabel('Senha do lojista').fill('senha-individual-browser-0123');
+  await modal.getByRole('button', { name: 'CADASTRAR', exact: true }).click();
+  await modal.getByRole('button', { name: 'Links de pagamento', exact: true }).click();
+  await modal.getByLabel('Valor em reais').waitFor();
+  assert.equal(await modal.getByRole('button', { name: 'Adicionar lojista' }).count(), 0);
   assert.deepEqual(errors, []);
-  console.log('Chromium: checkout, modal, autenticação, credenciais, crédito, débito e autenticação simulada, ViaCEP, troca de lojista, autorização, download XLSX, Telegram Monitor, saída e responsividade (1448/768/390/320 px).');
+  console.log('Chromium: checkout, modal, autenticação, credenciais, crédito, débito e autenticação simulada, ViaCEP, troca de lojista, autorização, download XLSX, Telegram Monitor, cadastro SaaS, saída e responsividade (1448/768/390/320 px).');
 } finally {
   await browser?.close();
   await app.close();

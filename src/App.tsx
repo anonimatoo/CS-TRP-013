@@ -1,3 +1,4 @@
+import { Links } from './pages/Links';
 import { useEffect, useState } from 'react';
 import { LogOut } from 'lucide-react';
 import { Checkout } from './pages/Checkout';
@@ -14,7 +15,7 @@ import { ApiError, adminSessionExpired, api, explain, merchantPath, storefrontMe
 
 const tabs = [
   { key: 'gateway', label: 'Gateway' }, { key: 'dashboard', label: 'Dashboard' },
-  { key: 'settings', label: 'Configuração comercial' }, { key: 'transactions', label: 'Transações' }, { key: 'notifications', label: 'Relatórios e Notificações' }, { key: 'telegram', label: 'Telegram Monitor' }
+  { key: 'settings', label: 'Configuração comercial' }, { key: 'transactions', label: 'Transações' }, { key: 'notifications', label: 'Relatórios e Notificações' }, { key: 'telegram', label: 'Telegram Monitor' }, { key: 'links', label: 'Links de pagamento' }
 ] as const;
 
 export default function App() {
@@ -22,6 +23,7 @@ export default function App() {
   const [loadError, setLoadError] = useState('');
   const [opened, setOpened] = useState(false);
   const [csrf, setCsrf] = useState('');
+  const [platform, setPlatform] = useState(false);
   const [checking, setChecking] = useState(false);
   const [logoutError, setLogoutError] = useState('');
   const [merchants, setMerchants] = useState<Merchant[]>([]);
@@ -95,7 +97,7 @@ export default function App() {
     setEnv(product?.environment ?? 'test');
     setOpened(true);
     setChecking(true);
-    api<{ csrf: string }>('/admin/session').then(result => setCsrf(result.csrf))
+    api<{ csrf: string; platform: boolean }>('/admin/session').then(result => { setPlatform(result.platform); setCsrf(result.csrf); })
       .catch(() => setCsrf('')).finally(() => setChecking(false));
   }
 
@@ -119,7 +121,7 @@ export default function App() {
     <Checkout onAdmin={open} product={product} loadError={loadError} refresh={refresh} />
     {opened && <Modal label={csrf ? 'CENTRAL DE CONFIGURAÇÃO PAGAR.ME / STONE' : 'Acesso administrativo'} onClose={close} wide={Boolean(csrf)}>
       {checking ? <p className="modal-body"><Loader /> Verificando sessão</p>
-        : !csrf ? <Login onLogin={setCsrf} onClose={close} />
+        : !csrf ? <Login onLogin={(token, isPlatform) => { setMerchants([]); setMerchantId(''); setPlatform(isPlatform); setCsrf(token); }} onClose={close} />
         : <>
           <div className="modal-body">
             <div className="fields two admin-fields">
@@ -129,10 +131,10 @@ export default function App() {
               }}><option value="" disabled>Selecione um lojista</option>
                 {merchants.map(row => <option key={row.id} value={row.id}>{row.name}</option>)}
               </select></label>
-              <form onSubmit={addMerchant}>
+              {platform && <form onSubmit={addMerchant}>
                 <Field label="Nome do novo lojista" maxLength={100} required value={merchantName} onChange={event => setMerchantName(event.target.value)} />
                 <button className="button secondary" disabled={addingMerchant}>Adicionar lojista</button>
-              </form>
+              </form>}
             </div>
             {merchant && !merchant.quarantined && <p className="help"><a href={merchantPath('/', merchant.id)}>Abrir checkout deste lojista</a></p>}
             {merchantError && <p className="notice error" role="alert">{merchantError}</p>}
@@ -149,8 +151,9 @@ export default function App() {
               void loadMerchantProduct(merchant.id).then(setMerchantProduct).catch(() => {});
             }} />}
             {tab === 'transactions' && <Transactions key={merchant.id + env} merchant={merchant.id} csrf={csrf} env={env} readOnly={merchant.quarantined} />}
-            {tab === 'telegram' && !merchant.quarantined && <TelegramMonitor key={merchant.id} merchant={merchant} csrf={csrf} />}
-            {tab === 'notifications' && <Notifications key={merchant.id} merchant={merchant} csrf={csrf} />}
+            {tab === 'links' && !merchant.quarantined && <Links key={merchant.id} merchant={merchant.id} csrf={csrf} />}
+            {tab === 'telegram' && !merchant.quarantined && <TelegramMonitor key={merchant.id} merchant={merchant} csrf={csrf} platform={platform} />}
+            {tab === 'notifications' && <Notifications key={merchant.id} merchant={merchant} csrf={csrf} platform={platform} />}
             </>}
             {logoutError && <p className="notice error" role="alert">{logoutError}</p>}
           </div>

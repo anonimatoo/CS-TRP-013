@@ -27,7 +27,7 @@ const errors: Record<string, string> = {
   payment_not_confirmed: 'Pagamento deixou de estar confirmado'
 };
 
-export function TelegramMonitor({ csrf, merchant }: { csrf: string; merchant: Merchant }) {
+export function TelegramMonitor({ csrf, merchant, platform }: { csrf: string; merchant: Merchant; platform: boolean }) {
   const [monitor, setMonitor] = useState<Monitor>();
   const [token, setToken] = useState('');
   const [chatId, setChatId] = useState('');
@@ -73,6 +73,7 @@ export function TelegramMonitor({ csrf, merchant }: { csrf: string; merchant: Me
         <div><dt>Enviadas pelo lojista</dt><dd>{monitor.totals.sent}</dd></div>
         <div><dt>Falhas do lojista</dt><dd>{monitor.totals.failed}</dd></div>
       </dl>
+      {platform && <>
       <form onSubmit={event => { event.preventDefault(); void act('/configuration', 'PUT', { token, chatId }, 'Configuração salva.'); }}>
         <h4>Destino central de todos os lojistas</h4>
         {monitor.source === 'environment' && <p>Para alterar o destino central, atualize as variáveis de ambiente da Vercel.</p>}
@@ -92,6 +93,7 @@ export function TelegramMonitor({ csrf, merchant }: { csrf: string; merchant: Me
         <button type="button" className="button secondary" disabled={busy || !monitor.enabled}
           onClick={() => void act('/activation', 'PUT', { enabled: false }, 'Notificações automáticas desativadas.')}>Desativar notificações</button>
       </div>
+      </>}
       <h4>Autorização de {merchant.name}</h4>
       <p>{monitor.authorized ? 'Autorizado para o chat atual desde ' + dateTime(monitor.authorizedAt) :
         monitor.revokedAt ? 'Autorização revogada em ' + dateTime(monitor.revokedAt) : 'Sem autorização para o chat atual.'}</p>

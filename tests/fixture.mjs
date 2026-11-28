@@ -21,7 +21,7 @@ export const otherKey = 'sk_test_local_013_outro_lojista';
 export const otherLiveKey = 'sk_local_013_outro_lojista';
 export const otherAccount = 'acc_OtherMerchant013';
 
-export async function fixture({ browser = false, port = 0, originOverride, allowLive = false, configOverrides = {}, mailTransport, telegramFetch, postgresUrl } = {}) {
+export async function fixture({ browser = false, port = 0, originOverride, allowLive = false, configOverrides = {}, mailTransport, telegramFetch, ipFetch, listenHost = '127.0.0.1', postgresUrl } = {}) {
   if (postgresUrl && !['127.0.0.1','localhost','[::1]'].includes(new URL(postgresUrl).hostname)) {
     throw new Error('Use um PostgreSQL local descartável para os testes.');
   }
@@ -79,6 +79,10 @@ export async function fixture({ browser = false, port = 0, originOverride, allow
     const body = options.body && JSON.parse(options.body);
     remote.calls.push({ hostname, route, key, method, body, idempotency: options.headers['Idempotency-Key'],
       userAgent: options.headers['User-Agent'], query: searchParams });
+    if (remote.networkDiagnostic && method === 'GET') {
+      const result = remote.networkDiagnostic(route);
+      if (result) return result;
+    }
     if (key === wrongKey || remote.failing) return output({ message: 'Invalid API key' }, 401);
     if (![firstKey,secondKey,liveKey,secondLiveKey,otherKey,otherLiveKey].includes(key)) return output({ message: 'Invalid API key' }, 401);
     const merchant = [otherKey,otherLiveKey].includes(key) ? otherAccount : account;
@@ -171,14 +175,14 @@ export async function fixture({ browser = false, port = 0, originOverride, allow
     return output({ logradouro: 'Praça da Sé', bairro: 'Sé', localidade: 'São Paulo', uf: 'SP' });
   };
   const host = express();
-  const server = host.listen(port, '127.0.0.1');
+  const server = host.listen(port, listenHost);
   await once(server, 'listening');
   const origin = 'http://127.0.0.1:' + server.address().port;
   const config = configFromEnv({
     ADMIN_PASSWORD: password, SESSION_SECRET: 'sessao_local_de_teste_exclusivamente_013',
     ENCRYPTION_KEY: Buffer.alloc(32, 17).toString('base64'), WEBHOOK_SECRET: hookSecret, APP_ORIGIN: originOverride ?? origin, ALLOW_LIVE_PAYMENTS: String(allowLive), PAGARME_DEBIT_APPROVAL_TEST: 'sandbox-approved-reference', ...configOverrides
   });
-  const createFixtureApp = () => createApp({ db, config, pagarme, viaFetch, mailTransport, telegramFetch,
+  const createFixtureApp = () => createApp({ db, config, pagarme, viaFetch, mailTransport, telegramFetch, ipFetch,
     stoneFetch: async () => remote.diagnostic3dsHttp ? Response.json({}, { status: remote.diagnostic3dsHttp }) : Response.json({ tds_token: 'fixture-3ds-token' }) });
   let app = createFixtureApp();
   const restart = () => { app = createFixtureApp(); };

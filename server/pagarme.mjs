@@ -54,6 +54,28 @@ export class ProviderError extends Error {
   }
 }
 
+async function explicitlyDeniedIP(response) {
+  const reader = response.body?.getReader();
+  if (!reader) return false;
+  let size = 0;
+  const chunks = [];
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > 4096) return false;
+      chunks.push(value);
+    }
+    const raw = Buffer.concat(chunks).toString('utf8');
+    const json = JSON.parse(raw);
+    return [json?.message, json?.error, ...Object.values(json?.errors ?? {}).flat()].some(message =>
+      typeof message === 'string' && /\bip(?: address| de origem)?\b/i.test(message) &&
+      /not (?:allowed|authorized|whitelisted)|not in (?:the )?(?:allowlist|whitelist)|n[aã]o (?:permitido|autorizado)|fora da lista/i.test(message));
+  } catch { return false; }
+  finally { void reader.cancel().catch(() => {}); }
+}
+
 export function makePagarme(fetcher = fetch, { timeout = 8000 } = {}) {
   return async function pagarme(key, path, { method = 'GET', body, idempotency, signal: deadline } = {}) {
     const paymentLink = /^\/paymentlinks(?:[/?]|$)/.test(path);
@@ -78,8 +100,10 @@ export function makePagarme(fetcher = fetch, { timeout = 8000 } = {}) {
     }
     const http = response.status;
     if (!response.ok) {
-      // Errors may contain submitted fields. Only the status is needed for diagnostics.
-      await response.body?.cancel().catch(() => {});
+      // Classify explicit denials without retaining or exposing the error body.
+      if ([401,403].includes(http)) {
+        if (await explicitlyDeniedIP(response)) throw new ProviderError(http, 'provider_ip_allowlist');
+      } else await response.body?.cancel().catch(() => {});
       throw new ProviderError(http, httpCategories.get(http) ??
         (http >= 500 ? 'provider_unavailable' : http >= 300 && http < 400 ? 'provider_redirect' : 'provider_http'));
     }

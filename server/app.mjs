@@ -1,3 +1,5 @@
+import { authenticateMerchant, registerMerchant } from './merchant-accounts.mjs';
+import { inspectConnectivity } from './connectivity.mjs';
 import { makeTelegram } from './telegram.mjs';
 import { diagnoseDebit } from './debit-diagnostics.mjs';
 import { addMerchant, defaultMerchant, merchantId, merchantRow, merchantWebhookSecret } from './merchants.mjs';
@@ -7,8 +9,8 @@ import express from 'express';
 import helmet from 'helmet';
 import { z } from 'zod';
 import { audit, one } from './db.mjs';
-import { environment, gatewayRow, gatewaySecret, makeGateway } from './gateway.mjs';
-import { makePagarme, ProviderError } from './pagarme.mjs';
+import { bindGatewayAccount, environment, gatewayRow, gatewaySecret, makeGateway } from './gateway.mjs';
+import { makePagarme, ProviderError, providerId } from './pagarme.mjs';
 import { makePayments, payment, productRow, publicOrder } from './payments.mjs';
 import { equalSecret, HttpError, makeSecurity } from './security.mjs';
 import { parseBrl, states } from '../shared/validation.mjs';
@@ -52,7 +54,7 @@ function adminOrder({ checkout_url, telegram_payment, ...row }) {
   return { ...row, has_checkout_url: Boolean(checkout_url) };
 }
 
-export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetch, stoneFetch = fetch, mailTransport, telegramFetch, runLocalNotifications = false }) {
+export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetch, stoneFetch = fetch, mailTransport, telegramFetch, ipFetch = fetch, runLocalNotifications = false }) {
   const app = express();
   app.disable('x-powered-by');
   if (config.production) app.set('trust proxy', 1);
@@ -178,27 +180,56 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
     res.json({ ...reports.value, telegram: monitor.status === 'fulfilled' ? monitor.value : { error: 'queue_processing_failed' } });
   });
 
+  app.get('/api/pay/:merchant/:id', security.limit('public-links', 60, 60), async (req, res) => {
+    const merchant = await merchantRow(db, req.params.merchant);
+    const id = parse(uuidParam, req.params.id, 'Referência inválida.');
+    const row = await scopedPayments(merchant).get(id);
+    const url = row?.hosted_checkout && row.price_version === null && publicOrder(row).checkoutUrl;
+    if (!url) throw new HttpError(404, 'Link de pagamento indisponível ou expirado.');
+    res.redirect(302, url);
+  });
+
+  app.post('/api/merchant/register', security.origin, security.limit('merchant-register', 8, 900),
+    security.limit('merchant-register-total', 60, 900, true), async (req, res) => {
+      const merchant = await registerMerchant(db, req.body);
+      await security.startSession(res, merchant.id);
+    });
+  app.post('/api/merchant/login', security.origin, security.limit('merchant-login', 12, 900),
+    security.limit('merchant-login-total', 120, 900, true), async (req, res) => {
+      await security.startSession(res, await authenticateMerchant(db, req.body));
+    });
+
+  function platformOnly(req, _res, next) {
+    if (req.admin.merchant_id) throw new HttpError(403, 'Esta ação é restrita à operação da plataforma.');
+    next();
+  }
+
   app.post('/api/admin/login', security.origin, security.limit('login-ip', 8, 900), security.limit('login-total', 80, 900, true), security.login);
   app.use('/api/admin', security.active);
   app.use('/api/admin', (req, res, next) => ['GET','HEAD'].includes(req.method) ? next() :
     security.origin(req, res, () => security.csrf(req, res, next)));
-  app.get('/api/admin/session', (req, res) => res.json({ csrf: req.admin.csrf }));
+  app.get('/api/admin/session', (req, res) => res.json({ csrf: req.admin.csrf, platform: !req.admin.merchant_id }));
   app.post('/api/admin/logout', security.logout);
-  app.get('/api/admin/merchants', async (_req, res) => {
+  app.get('/api/admin/merchants', async (req, res) => {
+    if (req.admin.merchant_id) return res.json([await merchantRow(db, req.admin.merchant_id)]);
     const { rows } = await db.query('SELECT id,name,quarantined FROM cs_trp_013_v2.merchants ORDER BY quarantined,created_at,id');
     res.json(rows);
   });
-  app.post('/api/admin/merchants', security.limit('merchants', 20, 60), async (req, res) => {
+  app.post('/api/admin/merchants', platformOnly, security.limit('merchants', 20, 60), async (req, res) => {
     res.status(201).json(await addMerchant(db, req.body));
   });
 
-  app.get('/api/admin/notifications/smtp', async (_req, res) => res.json(await notifications.smtpInfo()));
-  app.put('/api/admin/notifications/smtp', security.limit('smtp-config', 8, 60), async (req, res) => {
+  app.get('/api/admin/notifications/smtp', platformOnly, async (_req, res) => res.json(await notifications.smtpInfo()));
+  app.put('/api/admin/notifications/smtp', platformOnly, security.limit('smtp-config', 8, 60), async (req, res) => {
     res.json(await notifications.configureSmtp(req.body));
   });
 
   app.use('/api/admin', async (req, res, next) => {
-    const merchant = await merchantRow(db, req.query.lojista, { allowQuarantine: true });
+    const ownMerchant = req.admin.merchant_id;
+    if (ownMerchant && req.query.lojista !== undefined && merchantId.safeParse(req.query.lojista).data !== ownMerchant) {
+      throw new HttpError(403, 'A sessão não tem acesso a este lojista.');
+    }
+    const merchant = await merchantRow(db, ownMerchant ?? req.query.lojista, { allowQuarantine: !ownMerchant });
     res.locals.merchant = merchant;
     if (merchant.quarantined && (!['GET','HEAD'].includes(req.method) ||
         !/^\/(summary|transactions|report|orders|financial-report)(\/|$)/.test(req.path))) {
@@ -211,17 +242,17 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
   app.get('/api/admin/telegram', async (_req, res) => {
     res.json(await telegram.overview(res.locals.merchant.id));
   });
-  app.put('/api/admin/telegram/configuration', security.limit('telegram-config', 10, 60, true), async (req, res) => {
+  app.put('/api/admin/telegram/configuration', platformOnly, security.limit('telegram-config', 10, 60, true), async (req, res) => {
     res.json(await telegram.configure(req.body));
   });
-  app.put('/api/admin/telegram/activation', security.limit('telegram-config', 10, 60, true), async (req, res) => {
+  app.put('/api/admin/telegram/activation', platformOnly, security.limit('telegram-config', 10, 60, true), async (req, res) => {
     const input = parse(z.object({ enabled: z.boolean() }).strict(), req.body, 'Informe a configuração de ativação.');
     res.json(await telegram.toggle(input.enabled));
   });
   app.put('/api/admin/telegram/authorization', security.limit('telegram-consent', 20, 60), async (req, res) => {
     res.json(await telegram.authorize(res.locals.merchant.id, req.body));
   });
-  app.post('/api/admin/telegram/:action', security.limit('telegram-test', 6, 60, true), async (req, res) => {
+  app.post('/api/admin/telegram/:action', platformOnly, security.limit('telegram-test', 6, 60, true), async (req, res) => {
     const action = parse(z.enum(['connection','test-message']), req.params.action, 'Ação inválida.');
     res.json(await telegram.test(action === 'test-message'));
   });
@@ -231,8 +262,10 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
     const filter = parse(notificationFilter, query, 'Filtros inválidos.');
     res.json(await notifications.history(res.locals.merchant.id, filter));
   });
-  app.get('/api/admin/notifications/settings', async (_req, res) => {
-    res.json(await notifications.settings(res.locals.merchant.id));
+  app.get('/api/admin/notifications/settings', async (req, res) => {
+    const settings = await notifications.settings(res.locals.merchant.id);
+    if (req.admin.merchant_id) settings.suggestedRecipient = '';
+    res.json(settings);
   });
   app.put('/api/admin/notifications/settings', async (req, res) => {
     res.json(await notifications.configure(res.locals.merchant.id, req.body));
@@ -253,6 +286,7 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
     const { lojista, consolidated, format, ...query } = req.query;
     const filter = parse(reportFilter, query, 'Filtros inválidos.');
     if (filter.from && filter.to && filter.from > filter.to) throw new HttpError(422, 'Revise o intervalo de datas.');
+    if (consolidated === 'true' && req.admin.merchant_id) throw new HttpError(403, 'A consolidação é restrita à plataforma.');
     if (consolidated === 'true' && res.locals.merchant.quarantined) throw new HttpError(409, 'Selecione um lojista ativo para consolidar.');
     const rows = await notifications.report(consolidated === 'true' ? null : res.locals.merchant.id, filter);
     if (format === 'xlsx') return sendWorkbook(res, rows);
@@ -262,6 +296,58 @@ export function createApp({ db, config, pagarme = makePagarme(), viaFetch = fetc
   });
 
   const adminGateway = res => makeGateway(db, config, pagarme, stoneFetch, res.locals.merchant.id);
+  app.post('/api/admin/gateway/:env/verify-account', security.limit('pagarme-account-verify', 8, 60), async (req, res) => {
+    const env = parse(environment, req.params.env, 'Ambiente inválido.');
+    const eventId = providerId(req.body?.eventId, 'hook');
+    if (!eventId) throw new HttpError(422, 'Informe a referência oficial de um evento da sua conta Pagar.me.');
+    const row = await gatewayRow(db, res.locals.merchant.id, env);
+    if (!row.secret) throw new HttpError(409, 'Cadastre a Secret Key antes da verificação.');
+    const { data } = await pagarme(gatewaySecret(config, row), '/hooks/' + eventId);
+    const account = providerId(data?.account?.id, 'acc');
+    if (data?.id !== eventId || !account || (row.account && row.account !== account)) {
+      throw new HttpError(409, 'O evento não confirma a titularidade desta conta.');
+    }
+    await bindGatewayAccount(db, config, row, account);
+    res.json({ account });
+  });
+  app.post('/api/admin/gateway/:env/connectivity', security.limit('pagarme-connectivity', 10, 60), async (req, res) => {
+    const env = parse(environment, req.params.env, 'Ambiente inválido.');
+    res.json(await inspectConnectivity({ db, config, pagarme, ipFetch, env, merchant: res.locals.merchant.id }));
+  });
+  app.get('/api/admin/links/:env', async (req, res) => {
+    const env = parse(environment, req.params.env, 'Ambiente inválido.');
+    const { rows } = await db.query(`SELECT * FROM cs_trp_013_v2.orders WHERE merchant_id=$1 AND environment=$2
+      AND hosted_checkout AND price_version IS NULL ORDER BY created_at DESC,id LIMIT 50`, [res.locals.merchant.id, env]);
+    res.json(rows.map(linkInfo));
+  });
+  app.post('/api/admin/links/:env', security.limit('merchant-links', 30, 60), async (req, res) => {
+    const env = parse(environment, req.params.env, 'Ambiente inválido.');
+    const input = parse(z.object({
+      id: uuidParam, name: z.string().trim().min(1).max(100), price: z.string().max(30),
+      installments: z.number().int().min(1).max(24)
+    }).strict(), req.body, 'Revise o valor, a descrição e as parcelas.');
+    const amount = parseBrl(input.price);
+    if (!amount || amount < config.min || amount > config.max || input.installments > amount) {
+      throw new HttpError(422, 'Valor ou parcelamento fora do limite da plataforma.');
+    }
+    res.json(linkInfo(await res.locals.payments.createLink(env, { ...input, amount })));
+  });
+  app.post('/api/admin/links/:env/:id/refresh', security.limit('merchant-link-refresh', 20, 60), async (req, res) => {
+    const env = parse(environment, req.params.env, 'Ambiente inválido.');
+    const id = parse(uuidParam, req.params.id, 'Referência inválida.');
+    const row = await res.locals.payments.get(id);
+    if (!row || !row.hosted_checkout || row.price_version !== null || row.environment !== env) {
+      throw new HttpError(404, 'Link indisponível.');
+    }
+    res.json(linkInfo(await res.locals.payments.refresh(row)));
+  });
+
+  function linkInfo(row) {
+    const { checkoutUrl, ...receipt } = publicOrder(row);
+    return { ...receipt, name: row.product_name,
+      checkoutUrl: checkoutUrl ? '/api/pay/' + row.merchant_id + '/' + row.id : null };
+  }
+
   app.get('/api/admin/gateway/:env', async (req, res) => {
     const env = parse(environment, req.params.env, 'Ambiente inválido.');
     const id = res.locals.merchant.id;
